@@ -1,0 +1,580 @@
+#include "seqlib.s2s"       'Default sequencer helpers (eg, vdac32%)
+
+' ------------------------------------------------------------------------------
+' Constant definitions
+const ch% := 2;             'Channel to control
+const tSample := 0.25;      'Update control every 0.25s
+
+const msPerStep := 0.01;    'Sequencer configuration
+const DACscale  := 1;       'Sequencer configuration
+const DACoffset := 0;       'Sequencer configuration
+
+const fs := 5e3;            'Sampling frequency
+const fftsz% := 8192;       'FFT samples to use
+const spWnd := fftsz% / fs; 'Length of FFT window
+const spRes := fs / fftsz%; 'FFT frequency resolution
+
+' ------------------------------------------------------------------------------
+' Configuration defaults (initial values)
+var freq := 8;              'Frequency to control
+var waitBefore := 5*60;     'Delay before experiment begin (s)
+var waitOpenLoop := 2*60;   'Open-loop stimulation length(s)
+var tRampOpenLoop := 30;    'On-ramp for open-loop stimulation (s)
+var waitBetween := 1*60;    'Delay between open-loop and closed-loop (s)
+var waitClosedLoop := 2*60; 'Closed-loop stimulation length (s)
+var vThres := 0.5;          'Minimum stimulation threshold (V)
+var vOpenLoop := 1.0;       'Open-loop stimulation amplitude (V pk-pk)
+var umax := 4.0;            'Maximum stimulation amplitude for PID (V pk-pk)
+var ref := 0.001;           'Reference target for closed-loop control (mV²)
+var kp := 500.;             'PI proportional gain
+var ki := 50.;              'PI integral gain
+
+' ------------------------------------------------------------------------------
+' General state variables
+var spView%;                'FFT spectrum analysis window
+var spBin%;                 'Target FFT spectrum bin index
+var chView%;                'View handle of the main time window
+var chFFT%, chPID%;         'Memory channels for results
+var chFFTSav%, chPIDSav%;   'Data channels to save results from memory
+var isConfigured%;          'Configuration OK (0 = false)
+var isActive%;              'Main loop active (0 = false)
+var isOpenLoop%;            'Open-loop stimulation active (0 = false)
+var isClosedLoop%;          'Closed-loop control active (0 = false)
+var tEstimationBegin;       'Starting point for theta estimation interval
+var tEstimationEnd;         'Final point for theta estimation interval
+var uRamp;                  'Fraction of vOpenLoop to apply during ramp (0 - 1)
+
+' ------------------------------------------------------------------------------
+' Controller state variables
+var tCur, y, e, u, ui, v;   'set to zero
+
+' ------------------------------------------------------------------------------
+' Running sequence state variables
+var runStep%, tNextStep;
+' Steps:
+'   0: manual mode
+'   1: waiting
+'   2: open-loop
+'   3: wait between open-loop and closed-loop
+'   4: closed-loop
+
+
+
+' ==============================================================================
+' Helper functions
+
+Func Now()
+'' Return current time for the selected channel
+View(chView%);
+return MaxTime(ch%);
+end;
+
+
+' ------------------------------------------------------------------------------
+Func EstimateParameters%()
+'' Estimate closed-loop control parameters from open-loop stimulation
+
+' Obtain mean FFT spectrum to be used as reference
+'TODO: replace by median of chFFT
+View(spView%);
+Process(tEstimationBegin, tEstimationEnd, 1);
+ref := View(spView%).[spBin%];
+
+' Calculate approximate inverse plant gain
+var invG := vOpenLoop / ref;
+
+' Set proportional gain to 20% of inverse plant gain
+kp := 0.2 * invG;
+
+' Set integral gain to 5% of inverse plant gain
+ki := 0.05 * invG;
+
+PrintLog("Estimated parameters\n");
+PrintLog("ref: %f\n", ref);
+PrintLog("invG: %f\n", invG);
+PrintLog("kp: %f\n", kp);
+PrintLog("ki: %f\n", ki);
+SaveLog%();
+
+return 1;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func ClearLog%();
+' Clear log text
+View(LogHandle());
+EditSelectAll();
+EditClear();
+
+return 1;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func SaveLog%();
+if (chView% > 0) then
+    View(chView%);
+    var logfilename$ := FileName$(3) + FileName$(4) + "_log.txt";
+    View(LogHandle());
+    FileSaveAs(logfilename$);
+endif;
+
+return 1;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func MoveHCursors%(chSrc%, chDst%);
+' Move horizontal cursors from chSrc% to chDst%
+var i%;
+for i% := 1 to 9 do ' Up to 9 horizontal cursors
+    if (HCursorExists(i%) and HCursorChan(i%) = chSrc%) then
+        var pos := HCursor(i%);
+        HCursor(i%, pos, chDst%);
+    endif;
+next;
+
+return 1;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func Save%();
+' Save memory channels to file, if available
+if (chFFT% > 0 and chPID% > 0) then
+    if (chFFTSav% = 0 and chPIDSav% = 0) then
+        'Saving for the first time
+        var list%[126];
+        ChanList(list%[], 128); 'List unused channels
+        if list%[0] >= 2 then
+            'Found at least 2 unused channels
+            chFFTSav% := list%[1];
+            chPIDSav% := list%[2];
+
+            'Save for the first time
+            MemSave(chFFT%, chFFTSav%);
+            MemSave(chPID%, chPIDSav%);
+        else
+            PrintLog("Error saving data (no unused channels available)!");
+        endif;
+    else
+        'Append to current channels
+        MemSave(chFFT%, chFFTSav%, -1, 1);
+        MemSave(chPID%, chPIDSav%, -1, 1);
+    endif;
+    
+    'Move reference cursors to new channels
+    MoveHCursors%(chFFT%, chFFTSav%);
+    MoveHCursors%(chPID%, chPIDSav%);
+    
+    'Update UI to signal user that we have saved successfully
+    ChanShow(chFFTSav%);
+    ChanShow(chPIDSav%);
+    ChanHide(chFFT%);
+    ChanHide(chPID%);
+endif;
+
+return 1;
+end;
+
+
+
+' ==============================================================================
+' Handler functions
+
+Func OptimiseView%();
+' Optimize Y range and channel visibility
+
+' If not in a time view, do nothing
+if (ViewKind() <> 0) then
+    return 1;
+endif;
+
+'FIXME: Hide unlabeled channels
+ChanHide(1, 3, 5, 7, 8);
+
+' Optimise Y range of visible channels for entire time range
+Optimise(-2, 0);
+
+' Move Stim channel to bottom
+ChanOrder(1,1,10);
+
+return 1;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func Configure%();
+' Prompt for configurations
+DlgCreate("Control parameters");
+DlgReal(1, "Controlled frequency", 4, 100);
+DlgReal(2, "Pause before experiment (s)", 0, 3600);
+DlgReal(3, "Length of open-loop stimulation (s)", 0, 3600);
+DlgReal(4, "On-ramp for open-loop stimulation (s)", 0, 3600);
+DlgReal(5, "Pause between open-loop and closed-loop (s)", 0, 3600);
+DlgReal(6, "Length of closed-loop stimulation (s)", 0, 3600);
+DlgReal(7, "Minimum stimulation threshold (V)", 0, 5);
+DlgReal(8, "Open-loop stimulation amplitude (V, peak-to-peak)", 0, 5);
+DlgReal(9, "Closed-loop stimulation limit (V, peak-to-peak)", 0, 5);
+DlgReal(10, "PID Proportional gain", 0, 1e6);
+DlgReal(11, "PID Integral gain", 0, 1e6);
+DlgReal(12, "Reference target power (mV², calculated from open-loop)", 0, 5);
+var ret% := DlgShow(freq, waitBefore, waitOpenLoop, tRampOpenLoop, waitBetween,
+                    waitClosedLoop, vThres, vOpenLoop, umax, kp, ki, ref);
+if (ret% = 0) then
+    'Dialog canceled
+    return 1;
+endif;
+
+'TODO: Warn about invalid configurations (eg, vOpenLoop > ulim, vThres+ulim > 5)
+
+if SampleStatus() = -1 then
+    'No sampling window active, start one with the current configuration
+    FileNew(0, 3);  'Create sampling window and make it visible
+endif;
+
+FrontView(-1);
+chView% := View();
+
+'TODO: Verify sampling and sequencer parameters
+
+' Initialize memory channels for results
+'TODO: check if FFT and PID channels already exist in current file
+if (chFFT% = 0) then
+    chFFT% := MemChan(1, 0, tSample);     'Create waveform channel
+    if chFFT% <= 0 then                   'Created OK?
+        PrintLog("Error opening FFT channel (%d)\n", chFFT%);
+        return 1;
+    endif;
+    ChanTitle$(chFFT%, "FFT");
+    ChanUnits$(chFFT%, "mV²");
+    ChanComment$(chFFT%, "FFT spectrum");
+    ChanShow(chFFT%);                     'display new channel
+endif;
+if chPID% = 0 then
+    chPID% := MemChan(1, 0, tSample);     'Create waveform channel
+    if chPID% <= 0 then                   'Created OK?
+        PrintLog("Error opening PID channel (%d)\n", chPID%);
+        return 1;
+    endif;
+    ChanTitle$(chPID%, "PID");
+    ChanUnits$(chPID%, "V");
+    ChanComment$(chPID%, "PID control action");
+    ChanShow(chPID%);                     'display new channel
+endif;
+
+' Initialize FFT Spectrum View
+'TODO: check if FFT window already exists for current sampling
+if (spView% = 0) then
+    spView% := SetPower(ch%, fftsz%, 2);  'cSpc, fftsz% {,wnd%:2 = Hamming}
+endif;
+spBin% := (freq / spRes) + 0.5; 'Find spectrum bin closest to target frequency
+
+'TODO: adjust window positions
+
+' Initialize sampler sequence
+SampleSequencer("CL_FFT.pls");
+
+isConfigured% := 1;
+
+return 1;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func Start%();
+' Check configuration
+if isActive% then
+    'Already active, do nothing
+    return 1;
+endif;
+
+if not isConfigured% then
+    Configure%();
+endif;
+
+if SampleStatus() = 0 then
+    'Sampling window is ready but inactive, start sampling
+    SampleStart();  'Start sampling immediately
+endif;
+
+' Initialize main loop
+tCur := Trunc(Max(spWnd, Now()) + 1.0);  'Start at next integer second
+ui := 0;
+isActive% := 1;
+
+' Update toolbar
+UpdateToolbar%();
+return 1;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func StartOpenLoop%();
+'Stop current stimulation
+StopStim%();
+
+' Reset ramp state
+uRamp := 0;
+
+' Signal open-loop stimulation start
+isOpenLoop% := 1;
+tEstimationBegin := Now();
+
+' Start main loop
+Start%();
+
+' Update toolbar
+UpdateToolbar%();
+return 1;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func StartClosedLoop%();
+if isClosedLoop% = 1 then
+    'Already active, do nothing
+    return 1;
+endif;
+
+' Stop current stimulation
+StopStim%();
+
+' Reset integral action
+ui := 0;
+
+' Enable closed-loop control
+isClosedLoop% := 1;
+
+' Start main loop
+Start%();
+
+' Add horizontal cursor as reference
+View(chView%);
+HCursorNew(chFFT%, ref);
+
+' Update toolbar
+UpdateToolbar%();
+return 1;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func StopStim%();
+' Finalize sampler sequence
+SampleKey("Q");
+
+if (isOpenLoop%) then
+    tEstimationEnd := Now();
+    EstimateParameters%();
+endif;
+
+' Reset stimulation state
+isOpenLoop% := 0;
+isClosedLoop% := 0;
+
+' Update toolbar
+UpdateToolbar%();
+return 1;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func Stop%();
+' Stop stimulation
+StopStim%();
+
+' Reset main loop
+isActive% := 0;
+runStep% := 0;
+
+' Save data
+Save%();
+
+' Update toolbar
+UpdateToolbar%();
+return 1;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func Reset%();
+' Close FFT window and clear state variables for new recording
+Stop%();
+if (spView% <> 0) then
+    View(spView%);
+    FileClose();
+    spView% := 0;
+endif;
+chFFT% := 0;
+chPID% := 0;
+chFFTSav% := 0;
+chPIDSav% := 0;
+isConfigured% := 0;
+
+return 1;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func Quit%();
+' Resets to stop stim and close FFT window, then quits toolbar
+Reset%();
+return 0;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func Run%()
+' Configure and start main loop
+Start%();
+
+' Move to first running step
+runStep% := 1;
+tNextStep := Round(Now()) + waitBefore;
+
+' Update run/start buttons
+UpdateToolbar%();
+return 1;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func NextStep%();
+docase
+case runStep% = 1 then
+    ' Start open-loop stimulation
+    StartOpenLoop%();
+    tNextStep := tNextStep + waitOpenLoop;
+    runStep% := 2;
+case runStep% = 2 then
+    ' Start wait between open-loop and closed-loop
+    StopStim%();
+    tNextStep := tNextStep + waitBetween;
+    runStep% := 3;
+case runStep% = 3 then
+    ' Start closed-loop stimulation
+    StartClosedLoop%();
+    tNextStep := tNextStep + waitClosedLoop;
+    runStep% := 4;
+case runStep% = 4 then
+    ' Finished
+    StopStim%();
+    runStep% := 0;
+endcase;
+
+' Update run/start buttons
+UpdateToolbar%();
+return 1;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func Idle%();
+' Main control loop
+if (isActive% and SampleStatus() = 2) then
+    ' Sampling is running
+
+    var tNow := Now();
+
+    ' Update running sequence
+    if (runStep% > 0) and (tNow >= tNextStep) then
+        NextStep%();
+    endif;
+
+    ' Perform actions
+    if (tNow >= tCur) then
+        ' Calculate FFT
+        'TODO: replace with ArrDot of data and e^-ijwt+window arrays for single frequency
+        '      see also sliding DFT or sliding Goertzelalgorithm
+        View(spView%);
+        Process(tCur - spWnd, tCur, 1);
+        y := View(spView%).[spBin%];
+        'PrintLog("%f: %f\n", tCur, y);
+
+        ' Update data
+        View(chView%);
+        MemSetItem(chFFT%, 0, tCur, y);
+        'Optimise(chFFT%);
+        
+        var amp;    'Auxiliary variable
+        
+        docase
+        case isOpenLoop% then
+            'Update sequencer
+            amp := 0.5 * uRamp * vOpenLoop;
+            SampleSeqVar(1, vHz%(freq, msPerStep));
+            SampleSeqVar(2, vSz%(amp, DACscale));
+            SampleSeqVar(3, vDAC32%(vThres + amp, DACscale, DACoffset));
+            SampleKey("S");
+            
+            'Update ramp
+            uRamp := Min(uRamp + tSample/tRampOpenLoop, 1.0);
+        case isClosedLoop% then
+            ' Calculate error and control action
+            e := ref - y;
+            ui := ui + ki * e * tSample;
+            v := kp * e + ui;
+
+            u := Min(Max(0, v), umax);  'Output saturation
+            ui := ui + (u - v);         'Prevent integral action windup
+
+            ' Update sampler
+            amp := 0.5 * u;
+            SampleSeqVar(1, vHz%(freq, msPerStep));
+            SampleSeqVar(2, vSz%(amp, DACscale));
+            SampleSeqVar(3, vDAC32%(vThres + amp, DACscale, DACoffset));
+            SampleKey("S");
+
+            ' Update data
+            View(chView%);
+            MemSetItem(chPID%, 0, tCur, u);
+            'Optimise(chPID%);
+        endcase;
+
+        ' Increment time for next loop
+        tCur := tCur + tSample;
+    endif;
+endif;
+
+return 1;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func UpdateToolbar%();
+' Enables/disables toolbar buttons according to current state
+ToolbarEnable(9, (not runStep%)); 'Run experiment
+ToolbarEnable(8, (runStep% > 0)); 'Next step
+ToolbarEnable(7, (not (runStep% or isActive%))); 'Start FFT
+ToolbarEnable(6, (not (runStep% or isOpenLoop% or isClosedLoop%))); 'Open-loop
+ToolbarEnable(5, (not (runStep% or isOpenLoop% or isClosedLoop%))); 'Closed-loop
+
+return 1;
+end;
+
+
+
+' ==============================================================================
+' Initialize toolbar with idle function
+
+ClearLog%();
+
+ToolbarSet(11, "Optimise view", OptimiseView%);
+ToolbarSet(10, "Configure", Configure%);
+ToolbarSet(9, "Run experiment", Run%);
+ToolbarSet(8, "Next step", NextStep%);
+ToolbarSet(7, "Start FFT", Start%);
+ToolbarSet(6, "Start open-loop", StartOpenLoop%);
+ToolbarSet(5, "Start closed-loop", StartClosedLoop%);
+ToolbarSet(4, "Stop stim", StopStim%);
+ToolbarSet(3, "Stop all", Stop%);
+ToolbarSet(2, "Reset", Reset%);
+ToolbarSet(1, "Quit", Quit%);
+ToolbarSet(0, "", Idle%);               'Idle state function
+Reset%();
+
+' Open configuration dialog and run
+Run%();
+Toolbar("Closed-loop PI", 0x03FF);      'Display toolbar, allow all user actions

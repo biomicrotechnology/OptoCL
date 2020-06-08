@@ -1,8 +1,8 @@
-#include "seqlib.s2s"       'Default sequencer helpers (eg, vdac32%)
+#include "seqlib.s2s"       'Default sequencer helpers (eg, vdac32%)
 
 ' ------------------------------------------------------------------------------
 ' Constant definitions
-const tLoop := 0.0625;      'Update control every 0.005s (200 Hz)
+const tLoop := 0.025;       'Update control every 0.005s (200 Hz)
 const fs% := 5e3;           'Sampling frequency
 const ts := 1.0/fs%;        'Sampling period
 const nStep% := 25;         'Number of samples to skip (downsample)
@@ -128,14 +128,14 @@ if (vSample% > 0 and chU% > 0) then
             
             ' Save for the first time
             MemSave(chU%, chUSav%);
-            MemSave(chU%, chMarkerSav%);
+            MemSave(chMarker%, chMarkerSav%);
         else
             PrintLog("Error saving data (no unused channels available)!");
         endif;
     else
         ' Append to current channels
         MemSave(chU%, chUSav%, -1, 1);
-        MemSave(chU%, chMarkerSav%, -1, 1);
+        MemSave(chMarker%, chMarkerSav%, -1, 1);
     endif;
     
     ' Move reference cursors to new channels
@@ -216,29 +216,33 @@ vSample% := list%[1];
 
 ' Initialize memory channels for control action
 'TODO: check if channel already exists in current file (if restarting script)
+var ch%;
 if chU% = 0 then
     View(vSample%);
-    chU% := MemChan(1, 0, tLoop);       'Create waveform channel
-    if chU% <= 0 then                   'Created OK?
-        PrintLog("Error opening 'u' channel (%d)\n", chU%);
+    ch% := MemChan(1, 0, tLoop);        'Create waveform channel
+    if ch% <= 0 then                    'Created OK?
+        PrintLog("Error opening 'u' channel (%d)\n", ch%);
         return 1;
     endif;
-    ChanTitle$(chU%, "U");
-    ChanUnits$(chU%, "V");
-    ChanComment$(chU%, "Control action");
-    ChanShow(chU%);                     'display new channel
+    ChanTitle$(ch%, "U");
+    ChanUnits$(ch%, "V");
+    ChanComment$(ch%, "Control action");
+    ChanShow(ch%);                      'display new channel
+    chU% := ch%;
 endif;
 
 if chMarker% = 0 then
     View(vSample%);
-    chMarker% := MemChan(5);            'Create marker channel
-    if chMarker% <= 0 then              'Created OK?
-        PrintLog("Error opening marker channel (%d)\n", chMarker%);
+    ch% := MemChan(7, 1);               'Create RealMark channel
+    if ch% <= 0 then                    'Created OK?
+        PrintLog("Error opening marker channel (%d)\n", ch%);
         return 1;
     endif;
-    ChanTitle$(chMarker%, "MPC");
-    ChanComment$(chMarker%, "MPC timing markers");
-    ChanShow(chMarker%);                'display new channel
+    ChanTitle$(ch%, "MPC");
+    ChanUnits$(ch%, "");
+    ChanComment$(ch%, "MPC timing markers");
+    ChanShow(ch%);                      'display new channel
+    chMarker% := ch%;
 endif;
 
 ' Initialize sampler sequence

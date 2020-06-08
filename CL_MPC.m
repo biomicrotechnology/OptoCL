@@ -2,7 +2,7 @@
 % First run this file, then run CL_MPC.s2s in Spike2
 % See also CL_MPC.s2s
 
-clc; clear;
+clear;
 fclose('all');
 
 %% Config
@@ -45,14 +45,18 @@ end
 
 %% Read
 tic
-N = 300*fs; % expected number of cycles (buffer size)
+N = 300*fs; % expected number of loops (buffer size)
 D = 2;      % number of states
 y_meas = nan(1,N);      % measured data (input)
 a_mpc  = nan(1,N);      % control parameter
 x_ukf  = nan(D,N);      % estimated states
 S_ukf  = nan(D,D,N);    % estimated covariances
 times  = nan(2,N);      % loop times
-i = 1;
+a_last = a;             % last used control
+a_calc = a;             % latest calculated control
+i = 1;          % loop counter
+c = 1;          % cycle counter
+ncycle = fs/f;  % number of samples per cycle
 while true
     % Wait for and read output
     [y,n] = fread(fid_y, 'double');
@@ -70,42 +74,46 @@ while true
     times(1,ii) = now;
     %fprintf('Read %d values\n', n);
 
-    try
-        % Create control input vector
-        u = [a*ones(n,1) cos(2*pi*f*dt*(ii-1))'];
+    % Create control input vector
+    a_ = a_last*ones(n,1);
+    a_(ceil(ii/ncycle) > c) = a_calc;
+    phi_ = 2*pi*f*dt*(ii-1)';
 
+    u = [a_ cos(phi_)];
+
+    % Update online state estimate
+    try
         % Obtain UKF estimate
         UKF_update(ukf, y, u, n);
-        x = ukf.State;
-        S = ukf.StateCovariance;
-
-        % Write control parameters
-        a_ = MPC_update(x, r);
-        n_ = fwrite(fid_u, a_, 'double');
-        times(2,ii) = now;
-        %fprintf('Wrote %d values\n', n_);
-    catch
-%         switch ME.identifier
-%             case 'MATLAB:UndefinedFunction'
-%         end
-        warning(ME.identifier);
-        warning(getReport(ME));
-    end
-
-    try
-        % Save state for next cycle
-        y_meas(ii) = y;
-        x_ukf(:,ii) = repmat(x(:), 1,n);
-        S_ukf(:,:,ii) = repmat(S, 1,1,n);
-        a_mpc(ii) = a;
     catch ME
-        warning(ME.identifier);
         warning(getReport(ME));
     end
     
-    i = i + n;
-    a = a_;
+    x = ukf.State;
+    S = ukf.StateCovariance;
 
+    % Calculate optimal control
+    try
+        % Write control parameters
+        a_calc = MPC_update(x, r);
+        n_ = fwrite(fid_u, a_calc, 'double');
+        times(2,ii) = now;
+        %fprintf('Wrote %d values\n', n_);
+    catch ME
+        warning(getReport(ME));
+    end
+
+    % Save state for next cycle
+    y_meas(ii) = y;
+    x_ukf(:,ii) = repmat(x(:), 1,n);
+    S_ukf(:,:,ii) = repmat(S, 1,1,n);
+    a_mpc(ii) = a_;
+    a_last = a_(end);
+    
+    % Next loop
+    i = i + n;
+    c = ceil(i/ncycle);
+    
     %toc
 end
 toc
@@ -133,7 +141,7 @@ for k = 1:N
     y_pred(k) = ukf.MeasurementFcn(x_ukf(:,k), u(:,k));
 end
 
-clf;
+figure;
 h = 4; w = 1;
 ha = gobjects(h,w);
 ha(1) = subplot(h,w,1);

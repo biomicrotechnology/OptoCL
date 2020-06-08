@@ -23,16 +23,16 @@ const nStep% := 25;         'Number of samples to skip (downsample)
 const msPerStep := 0.01;    'Sequencer configuration
 const DACscale  := 1;       'Sequencer configuration
 const DACoffset := 0;       'Sequencer configuration
+const varFreq% := 1;        'Sequencer variable number
+const varSize% := 2;        'Sequencer variable number
+const varOffs% := 3;        'Sequencer variable number
 
 const pathBase$ := "C:\\MPC";                   ' Path for MATLAB IPC files
 const pathFileY$ := pathBase$ + "\\" + "y.bin"; ' Path for MATLAB IPC files
 const pathFileU$ := pathBase$ + "\\" + "u.bin"; ' Path for MATLAB IPC files
 const pathLock$  := pathBase$ + "\\" + "lock";  ' Path for MATLAB IPC files
 
-const markReadU%   := 0x52; 'Digital marker for reading data (control u): 'R"
-const markSeqU%    := 0x44; 'Digital marker for updating DAC (control u): 'D'
-const markSampleY% := 0x53; 'Digital marker for sampled data (sampled y): 'S'
-const markWriteY%  := 0x57; 'Digital marker for writing data (sampled y): 'W"
+
 
 ' ------------------------------------------------------------------------------
 ' Configuration defaults (initial values)
@@ -41,7 +41,6 @@ var freq := 8;              'Frequency to control
 var waitBefore := 5;        'Delay before experiment begin (s)
 var waitMPC:= 10;           'MPC duration (s)
 var vThres := 0.5;          'Minimum stimulation threshold (V)
-var vOpenLoop := 1.0;       'Open-loop stimulation amplitude (V pk-pk)
 var umax := 4.0;            'Maximum stimulation amplitude for PID (V pk-pk)
 var ref := 0.2;             'Reference target for closed-loop control (mV)
 
@@ -403,7 +402,7 @@ UpdateStateCh%(chSampleCount%, Now(), ret%);
 
 if (ret% > 0) then
     'FIXME: Downsample
-    n% := (ret%-1)/nStep% + 1; 'truncated
+    n% := (ret%-1)/nStep% + 1;  'truncated
     var i%;
     var bufferY[n%];
     for i% := 0 to (n%-1) do
@@ -539,9 +538,9 @@ end;
 Func UpdateSequencer%();
 ' Update sequencer variables
 var amp := 0.5 * u;
-SampleSeqVar(1, vHz%(freq, msPerStep));
-SampleSeqVar(2, vSz%(amp, DACscale));
-SampleSeqVar(3, vDAC32%(vThres + amp, DACscale, DACoffset));
+SampleSeqVar(varFreq%, vHz%(freq, msPerStep));
+SampleSeqVar(varSize%, vSz%(amp, DACscale));
+SampleSeqVar(varOffs%, vDAC32%(vThres + amp, DACscale, DACoffset));
 
 ' Update data and marker channels
 UpdateStateCh%(chSeqValueU%, Now(), u);

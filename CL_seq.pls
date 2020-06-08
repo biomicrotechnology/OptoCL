@@ -6,10 +6,10 @@ NLoop       =      8*300           ;Maximum stimulation duration (in number of l
 ;Configuration
             SET    0.01,1,0        ;msPerStep, DACscale, DACoffset
 
-            VAR    V1,VFreq        ;For holding the frequency of each sequence
-            VAR    V2,VSize        ;For holding the cosine amplitude
-            VAR    V3,VOffset      ;For holding the cosine frequency
-            VAR    V4,VLoopC       ;For holding the cosine frequency
+            VAR    V1,VFreq        ;Cosine frequency
+            VAR    V2,VSize        ;Cosine amplitude
+            VAR    V3,VOffset      ;Cosine offset
+            VAR    V5,VLoopC       ;Loop counter
 
 
 ;Program start
@@ -26,8 +26,8 @@ E0:     'Q  RATE   Ch,0            ;Stop any ongoing stimulation (Keyboard short
             ANGLE  Ch,0            ;Set cosine phase step
             CLRC   Ch              ;Clear wait flag
             MOVI   VLoopC,NLoop    ;Set maximum number of cycles
-LOOP0:      RATE   Ch,0            ;Stop cosine output
-            SZ     Ch,VSize        ;Set cosine amplitude
+            ;FIXME: use RATE 0 to avoid transient plus ANGLE or DELAY for no phase drift
+LOOP0:      SZ     Ch,VSize        ;Set cosine amplitude
             OFFSET Ch,VOffset      ;Set cosine centre
             RATE   Ch,VFreq        ;Set rate and start cosine
             MARK   1               ;Digital mark 1

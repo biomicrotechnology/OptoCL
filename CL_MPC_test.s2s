@@ -35,14 +35,16 @@ var ref := 0.2;             'Reference target for closed-loop control (mV)
 ' ------------------------------------------------------------------------------
 ' General state variables
 var vSample%;               'View handle of the main time window
-var chU%;                   'Memory channels for results
-var chMarker%;              'Memory channels for markers
-var chUSav%;                'Data channels to save results from memory
-var chMarkerSav%;           'Data channels to save markers from memory
 var isConfigured%;          'Configuration OK (0 = false)
 var isStimOn%;              'Stimulation sequence active (0 = false)
 var isMPCReady%;            'MPC active (0 = false)
-var uRamp;                  'Fraction of vOpenLoop to apply during ramp (0 - 1)
+
+var chSeqValueU%;           'Values sent to DAC sequencer (control u)
+var chReadCount%;           'Number of values read (control u)
+var chSampleCount%;         'Number of values sampled (sampled y)
+var chWriteCount%;          'Number of values written (sampled y)
+var chLoopTime%;            'Time spent in loop (s)
+var chStateSav%[5];         'Data channels to save results from memory
 
 const nBuffer% := 1024;
 var bufferSample[nBuffer%*nStep%];
@@ -112,42 +114,54 @@ end;
 
 
 ' ------------------------------------------------------------------------------
-Func Save%();
+Func SaveChannel%(chMem%, chSav%);
 ' Save memory channels to file, if available
-if (vSample% > 0 and chU% > 0) then
-    View(vSample%);
-    
-    if (chUSav% = 0) then
-        ' Saving for the first time
-        var list%[3];
-        ChanList(list%[], 0x80); 'List unused channels
-        if list%[0] >= 2 then
-            ' Found at least 2 unused channels
-            chUSav% := list%[1];
-            chMarkerSav% := list%[2];
-            
-            ' Save for the first time
-            MemSave(chU%, chUSav%);
-            MemSave(chMarker%, chMarkerSav%);
-        else
-            PrintLog("Error saving data (no unused channels available)!");
-        endif;
-    else
-        ' Append to current channels
-        MemSave(chU%, chUSav%, -1, 1);
-        MemSave(chMarker%, chMarkerSav%, -1, 1);
-    endif;
-    
-    ' Move reference cursors to new channels
-    MoveHCursors%(chU%, chUSav%);
-    
-    ' Update UI to signal user that we have saved successfully
-    ChanShow(chUSav%);
-    ChanShow(chMarkerSav%);
-    ChanHide(chU%);
-    ChanHide(chMarker%);
+
+' Check that window and channels exist
+if (vSample% = 0 or chMem% = 0) then
+    return 0;
 endif;
 
+' Create channel if needed
+View(vSample%);    
+if (chSav% = 0) then
+    'List unused channels
+    var list%[2];
+    ChanList(list%[], 0x80); 
+    if list%[0] < 1 then
+        PrintLog("Error saving data (not enough channels available)!");
+        return -1;
+    endif;
+    
+    ' Store channel number
+    chSav% := list%[1];
+endif;
+
+' Save data
+MemSave(chMem%, chSav%, 0, 1);
+
+' Move reference cursors to new channels
+MoveHCursors%(chMem%, chSav%);
+
+' Update UI to signal user that we have saved successfully
+ChanHide(chMem%);
+ChanShow(chSav%);
+YRange(chSav%, YLow(chMem%), YHigh(chMem%));
+
+return chSav%;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func Save%();
+' Save state variable channels
+chStateSav%[0] := SaveChannel%(chSeqValueU%,   chStateSav%[0]);
+chStateSav%[1] := SaveChannel%(chReadCount%,   chStateSav%[1]);
+chStateSav%[2] := SaveChannel%(chWriteCount%,  chStateSav%[2]);
+chStateSav%[3] := SaveChannel%(chSampleCount%, chStateSav%[3]);
+chStateSav%[4] := SaveChannel%(chLoopTime%,    chStateSav%[4]);
+
+'Save log
 SaveLog%();
 
 return 1;
@@ -214,36 +228,12 @@ vSample% := list%[1];
 
 'TODO: Verify sampling and sequencer parameters
 
-' Initialize memory channels for control action
-'TODO: check if channel already exists in current file (if restarting script)
-var ch%;
-if chU% = 0 then
-    View(vSample%);
-    ch% := MemChan(1, 0, tLoop);        'Create waveform channel
-    if ch% <= 0 then                    'Created OK?
-        PrintLog("Error opening 'u' channel (%d)\n", ch%);
-        return 1;
-    endif;
-    ChanTitle$(ch%, "U");
-    ChanUnits$(ch%, "V");
-    ChanComment$(ch%, "Control action");
-    ChanShow(ch%);                      'display new channel
-    chU% := ch%;
-endif;
-
-if chMarker% = 0 then
-    View(vSample%);
-    ch% := MemChan(7, 1);               'Create RealMark channel
-    if ch% <= 0 then                    'Created OK?
-        PrintLog("Error opening marker channel (%d)\n", ch%);
-        return 1;
-    endif;
-    ChanTitle$(ch%, "MPC");
-    ChanUnits$(ch%, "");
-    ChanComment$(ch%, "MPC timing markers");
-    ChanShow(ch%);                      'display new channel
-    chMarker% := ch%;
-endif;
+' Initialize memory channels for state variables
+chSeqValueU%   := CreateMemoryChannel%(chSeqValueU%,   "u",        "", "", 0.0, 1.0);
+chReadCount%   := CreateMemoryChannel%(chReadCount%,   "read",    "#", "", 0.0, 2.0);
+chSampleCount% := CreateMemoryChannel%(chSampleCount%, "sampled", "#", "", 0.0, 2.0*fs%*tLoop);
+chWriteCount%  := CreateMemoryChannel%(chWriteCount%,  "written", "#", "", 0.0, 2.0*fs%*tLoop/nStep%);
+chLoopTime%    := CreateMemoryChannel%(chLoopTime%,    "loop",    "s", "", 0.0, 2.0*tLoop);
 
 ' Initialize sampler sequence
 SampleSequencer("CL_seq.pls");
@@ -251,6 +241,36 @@ SampleSequencer("CL_seq.pls");
 isConfigured% := 1;
 
 return 1;
+end;
+
+' ------------------------------------------------------------------------------
+Func CreateMemoryChannel%(ch%, title$, unit$, comment$, dispMin, dispMax)
+'Creates a memory channel with the given parameters
+
+' Do nothing if channel already exists
+if (ch% <> 0) then
+    return ch%;
+endif;
+
+View(vSample%);
+
+'Create a RealMark channel, for variable and precise timing
+ch% := MemChan(7, 1);   
+if ch% <= 0 then                    'Created OK?
+    PrintLog("Error creating '%s' channel (%d)\n", title$, ch%);
+    return 0;
+endif;
+
+ChanTitle$(ch%, title$);
+ChanUnits$(ch%, unit$);
+ChanComment$(ch%, comment$);
+
+'Display new channel
+ChanShow(ch%);
+YRange(ch%, dispMin, dispMax);
+
+
+return ch%;
 end;
 
 
@@ -274,8 +294,11 @@ InitMPC%();
 
 ' Show sampling window and memory channels (if hidden)
 View(vSample%);
-ChanShow(chU%);
-ChanShow(chMarker%);
+ChanShow(chSeqValueU%);
+ChanShow(chReadCount%);
+ChanShow(chWriteCount%);
+ChanShow(chSampleCount%);
+ChanShow(chLoopTime%);
 
 'Test
 PrintLog("Start: %f\n", Now());
@@ -346,9 +369,7 @@ if (n% > 0) then
 endif;
 
 ' Update marker channel
-View(vSample%);
-var buffer[1]; buffer[0] := n%;
-MemSetItem(chMarker%, 0, Now(), markReadU%, buffer);
+UpdateStateCh%(chReadCount%, Now(), n%);
 
 return ret%;
 end;
@@ -357,7 +378,7 @@ end;
 ' ------------------------------------------------------------------------------
 Func UpdateUKF%();
 
-var ret%, pos%, n%, buffer[1]; 'auxiliary variables
+var ret%, pos%, n%; 'auxiliary variables
 
 ' Copy channel data to array
 View(vSample%);
@@ -365,9 +386,7 @@ ret% := ChanData(ch%, bufferSample, tLast+ts, tCur);
 'PrintLog("Sampled %d\n", ret%);
 
 ' Update marker channel
-'View(vSample%);
-buffer[0] := ret%;
-MemSetItem(chMarker%, 0, Now(), markSampleY%, buffer);
+UpdateStateCh%(chSampleCount%, Now(), ret%);
 
 if (ret% > 0) then
     'FIXME: Downsample
@@ -385,9 +404,7 @@ if (ret% > 0) then
 endif;
 
 ' Update marker channel
-View(vSample%);
-buffer[0] := n%;
-MemSetItem(chMarker%, 0, Now(), markWriteY%, buffer);
+UpdateStateCh%(chWriteCount%, Now(), n%);
 
 return 1;
 end;
@@ -406,31 +423,42 @@ Yield(tCur - Now()); 'sleep (no wait if negative)
 'Run
 PrintLog("Start MPC (tCur: %f): %f\n", tCur, Now());
 while tCur <= tEnd do
-    'PrintLog("Run (tCur: %f): %f (lag: %f / %f ms)\n", tCur, Now(), (Now()-tCur)*1000.0, tLoop*1000.0);
+    'Read control action
     var ret% := UpdateMPC%();
     if (ret%) then
         UpdateSequencer%();
     endif;
     
+    'Write sampled values
     UpdateUKF%();
     
-    'FIXME: interrupt with SampleSeqVar?
+    'Update state variables
+    var tSpent := (Now() - tCur);
+    UpdateStateCh%(chLoopTime%, tCur, tSpent);
+    if (tSpent > tLoop) then
+        PrintLog("Exceeded loop time! (tCur: %f): %f\n", tCur, tSpent);
+    endif;
     
+    'Continue with next loop
     tLast := tCur;
     tCur := tCur + tLoop;
-    
-    if (tCur > Now()) then
-        Yield(tCur - Now()); 'sleep (no wait if negative)
-    else
-        PrintLog("Exceeded loop time! (tCur: %f): %f\n", tCur, Now());
-    endif;
+    Yield(tCur - Now()); 'sleep (no wait if negative)
 wend;
 
-' Clear IPC and lockfile
 PrintLog("Stop MPC (tLast: %f): %f\n", tLast, Now());
+
+' Clear IPC and lockfile
 StopMPC%();
 
 return 1;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func UpdateStateCh%(ch%, t, value);
+View(vSample%);
+var buffer[1]; buffer[0] := value;
+MemSetItem(ch%, 0, t, 1, buffer);
 end;
 
 
@@ -501,10 +529,7 @@ if (not isStimOn%) then
 endif;
 
 ' Update data and marker channels
-View(vSample%);
-var buffer[1]; buffer[0] := u;
-MemSetItem(chMarker%, 0, Now(), markSeqU%, buffer);
-MemSetItem(chU%, 0, tCur, u);
+UpdateStateCh%(chSeqValueU%, Now(), u);
 
 return 1;
 end;

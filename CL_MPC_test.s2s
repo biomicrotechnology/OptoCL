@@ -15,7 +15,7 @@
 
 ' ------------------------------------------------------------------------------
 ' Constant definitions
-const tLoop := 0.025;       'Update control every 0.005s (200 Hz)
+const tLoop := 0.005;       'Update control every 0.005s (200 Hz)
 const fs% := 5e3;           'Sampling frequency
 const ts := 1.0/fs%;        'Sampling period
 const nStep% := 25;         'Number of samples to skip (downsample)
@@ -324,13 +324,19 @@ end;
 ' ------------------------------------------------------------------------------
 Func InitMPC%();
 
-FilePathSet(pathBase$, 0, 1);   ' set current dir, create dir
+' Set current dir (create if non-existent)
+FilePathSet(pathBase$, 0, 1);
 
+' Open files for IPC (inter-process communication)
 if (isMPCReady% = 0) then
     vFileL% := FileOpen(pathLock$,  9, 1);  'binary, write (new file)
     vFileY% := FileOpen(pathFileY$, 9, 1);  'binary, write (new file)
     vFileU% := FileOpen(pathFileU$, 9, 0);  'binary, read (existing file)
     
+    ' Read initial control parameters
+    View(vFileU%);
+    BReadSize(8, u); '64-bit double
+        
     isMPCReady% := 1;
 endif;
 
@@ -367,23 +373,22 @@ end;
 ' ------------------------------------------------------------------------------
 Func UpdateMPC%();
 
-var n%, pos%, ret%; 'auxiliary variables
+var n%, pos%; 'auxiliary variables
 
 ' Read control parameters
 View(vFileU%);
 n% := BReadSize(8, bufferU); '64-bit double
-'PrintLog("Read %d\n", ret%);
+'PrintLog("Read %d\n", n%);
 
 if (n% > 0) then
     ' Set control parameter
     u := bufferU[n%-1]; 'read last value
-    ret% := 1;
 endif;
 
 ' Update marker channel
 UpdateStateCh%(chReadCount%, Now(), n%);
 
-return ret%;
+return n%;
 end;
 
 
@@ -424,10 +429,6 @@ end;
 
 ' ------------------------------------------------------------------------------
 Func RunMPC%();
-' Set initial sequencer value
-UpdateMPC%();
-UpdateSequencer%();
-
 ' Initialize main loop
 tCur := Trunc(Now() + 1.0);  'Start at next integer second
 var tEnd := tCur + waitMPC;
@@ -436,6 +437,7 @@ var tEnd := tCur + waitMPC;
 Yield(tCur - Now()); 'sleep (no wait if negative)
 
 'Run
+UpdateSequencer%();
 StartStim%();
 PrintLog("Start MPC (tCur: %f): %f\n", tCur, Now());
 tLast := tCur;

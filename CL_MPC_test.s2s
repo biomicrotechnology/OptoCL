@@ -1,3 +1,16 @@
+' README
+'
+' # Configuration (for real-time performance)
+' ## Spike 2
+' - In "Edit -> "Edit preferences..." -> "Scheduler", set values to (1, 0, 0).
+' ## Windows Task Manager
+' - In "Details", set priority of "sonview.exe" and "MATLAB.exe" to "Realtime".
+'
+' # Running
+' 1) Open MATLAB, run "CL_MPC.m".
+' 2) Run this script.
+'
+' ==============================================================================
 #include "seqlib.s2s"       'Default sequencer helpers (eg, vdac32%)
 
 ' ------------------------------------------------------------------------------
@@ -412,25 +425,31 @@ end;
 
 ' ------------------------------------------------------------------------------
 Func RunMPC%();
+' Set initial sequencer value
+UpdateMPC%();
+UpdateSequencer%();
+
 ' Initialize main loop
 tCur := Trunc(Now() + 1.0);  'Start at next integer second
-tLast := tCur;
 var tEnd := tCur + waitMPC;
 
 ' Wait to start time
 Yield(tCur - Now()); 'sleep (no wait if negative)
 
 'Run
+StartStim%();
 PrintLog("Start MPC (tCur: %f): %f\n", tCur, Now());
+tLast := tCur;
+tCur := tCur + tLoop;
 while tCur <= tEnd do
+    'Write sampled values
+    UpdateUKF%();
+    
     'Read control action
     var ret% := UpdateMPC%();
     if (ret%) then
         UpdateSequencer%();
     endif;
-    
-    'Write sampled values
-    UpdateUKF%();
     
     'Update state variables
     var tSpent := (Now() - tCur);
@@ -523,10 +542,6 @@ var amp := 0.5 * u;
 SampleSeqVar(1, vHz%(freq, msPerStep));
 SampleSeqVar(2, vSz%(amp, DACscale));
 SampleSeqVar(3, vDAC32%(vThres + amp, DACscale, DACoffset));
-
-if (not isStimOn%) then
-    StartStim%();
-endif;
 
 ' Update data and marker channels
 UpdateStateCh%(chSeqValueU%, Now(), u);

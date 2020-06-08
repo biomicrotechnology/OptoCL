@@ -1,3 +1,7 @@
+% README
+% First run this file, then run CL_MPC.s2s in Spike2
+% See also CL_MPC.s2s
+
 clc; clear;
 fclose('all');
 
@@ -6,6 +10,7 @@ fclose('all');
 fs = 200;   % sampling rate for UKF/MPC
 r = 0.2;    % target reference
 f = 8;      % Hz
+dt = 1/fs;
 
 % Path
 basepath = 'C:\MPC\';
@@ -40,7 +45,6 @@ end
 
 %% Read
 tic
-i = 1;
 N = 300*fs; % expected number of cycles (buffer size)
 D = 2;      % number of states
 y_meas = nan(1,N);      % measured data (input)
@@ -48,7 +52,7 @@ a_mpc  = nan(1,N);      % control parameter
 x_ukf  = nan(D,N);      % estimated states
 S_ukf  = nan(D,D,N);    % estimated covariances
 times  = nan(2,N);      % loop times
-dt = 1/fs;
+i = 1;
 while true
     % Wait for and read output
     [y,n] = fread(fid_y, 'double');
@@ -122,18 +126,33 @@ fprintf('Saved %s\n', matfile);
 
 
 %% Plot
-clf;
 t = dt*(1:N);
 y_pred = nan(1,N);
 u = [a_mpc; cos(2*pi*f*dt*(0:N-1))];
 for k = 1:N
     y_pred(k) = ukf.MeasurementFcn(x_ukf(:,k), u(:,k));
 end
-subplot(211);
-plot(t, u);
-subplot(212);
-plot(t, [y_meas; y_pred]);
 
+clf;
+h = 4; w = 1;
+ha = gobjects(h,w);
+ha(1) = subplot(h,w,1);
+plot(t, u);
+ylabel('u');
+
+ha(2) = subplot(h,w,2);
+plot(t, [y_meas; y_pred]);
+ylabel('y');
+
+ha(3) = subplot(h,w,3);
+plot(t, x_ukf(1,:));
+ylabel('g');
+
+ha(4) = subplot(h,w,4);
+plot(t, x_ukf(2,:));
+ylabel('b');
+
+linkaxes(ha, 'x');
 
 %% Functions
 function a = MPC_update(x, r)

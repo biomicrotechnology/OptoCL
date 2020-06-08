@@ -2,7 +2,7 @@
 
 ' ------------------------------------------------------------------------------
 ' Constant definitions
-const ch% := 2;             'Channel to control
+const ch% := 1;             'Channel to control
 const tSample := 0.25;      'Update control every 0.25s
 
 const msPerStep := 0.01;    'Sequencer configuration

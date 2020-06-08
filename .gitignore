@@ -9,3 +9,6 @@
 
 # MATLAB workspace
 *.mat
+
+# Spike2 data files
+*.smr

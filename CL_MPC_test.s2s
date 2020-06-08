@@ -1,0 +1,545 @@
+#include "seqlib.s2s"       'Default sequencer helpers (eg, vdac32%)
+
+' ------------------------------------------------------------------------------
+' Constant definitions
+const tLoop := 0.0625;      'Update control every 0.005s (200 Hz)
+const fs% := 5e3;           'Sampling frequency
+const ts := 1.0/fs%;        'Sampling period
+const nStep% := 25;         'Number of samples to skip (downsample)
+
+const msPerStep := 0.01;    'Sequencer configuration
+const DACscale  := 1;       'Sequencer configuration
+const DACoffset := 0;       'Sequencer configuration
+
+const pathBase$ := "C:\\MPC";                   ' Path for MATLAB IPC files
+const pathFileY$ := pathBase$ + "\\" + "y.bin"; ' Path for MATLAB IPC files
+const pathFileU$ := pathBase$ + "\\" + "u.bin"; ' Path for MATLAB IPC files
+const pathLock$  := pathBase$ + "\\" + "lock";  ' Path for MATLAB IPC files
+
+const markReadU%   := 0x52; 'Digital marker for reading data (control u): 'R"
+const markSeqU%    := 0x44; 'Digital marker for updating DAC (control u): 'D'
+const markSampleY% := 0x53; 'Digital marker for sampled data (sampled y): 'S'
+const markWriteY%  := 0x57; 'Digital marker for writing data (sampled y): 'W"
+
+' ------------------------------------------------------------------------------
+' Configuration defaults (initial values)
+var ch% := 1;               'Channel to control
+var freq := 8;              'Frequency to control
+var waitBefore := 5;        'Delay before experiment begin (s)
+var waitMPC:= 10;           'MPC duration (s)
+var vThres := 0.5;          'Minimum stimulation threshold (V)
+var vOpenLoop := 1.0;       'Open-loop stimulation amplitude (V pk-pk)
+var umax := 4.0;            'Maximum stimulation amplitude for PID (V pk-pk)
+var ref := 0.2;             'Reference target for closed-loop control (mV)
+
+' ------------------------------------------------------------------------------
+' General state variables
+var vSample%;               'View handle of the main time window
+var chU%;                   'Memory channels for results
+var chMarker%;              'Memory channels for markers
+var chUSav%;                'Data channels to save results from memory
+var chMarkerSav%;           'Data channels to save markers from memory
+var isConfigured%;          'Configuration OK (0 = false)
+var isStimOn%;              'Stimulation sequence active (0 = false)
+var isMPCReady%;            'MPC active (0 = false)
+var uRamp;                  'Fraction of vOpenLoop to apply during ramp (0 - 1)
+
+const nBuffer% := 1024;
+var bufferSample[nBuffer%*nStep%];
+var bufferU[nBuffer%];
+
+var vFileL%;
+var vFileY%;
+var vFileU%;
+
+' ------------------------------------------------------------------------------
+' Controller state variables
+var tCur, tLast, y, u;   'set to zero
+
+' ==============================================================================
+' Helper functions
+
+'TEST
+var tStart := -1;
+Func Now()
+'' Return current time for the selected channel
+View(vSample%);
+'TEST
+'return MaxTime(ch%);
+if tStart = -1 then tStart := Seconds(); endif;
+return Seconds() - tStart;
+'
+end;
+
+
+' ------------------------------------------------------------------------------
+Func ClearLog%();
+' Clear log text
+View(LogHandle());
+EditSelectAll();
+EditClear();
+
+return 1;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func SaveLog%();
+if (vSample% > 0) then
+    View(vSample%);
+    var logfilename$ := FileName$(3) + FileName$(4) + "_log.txt";
+    View(LogHandle());
+    FileSaveAs(logfilename$, -1, 1);
+endif;
+
+return 1;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func MoveHCursors%(chSrc%, chDst%);
+' Move horizontal cursors from chSrc% to chDst%
+var i%;
+for i% := 1 to 9 do ' Up to 9 horizontal cursors
+    if (HCursorExists(i%) and HCursorChan(i%) = chSrc%) then
+        var pos := HCursor(i%);
+        HCursor(i%, pos, chDst%);
+    endif;
+next;
+
+return 1;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func Save%();
+' Save memory channels to file, if available
+if (vSample% > 0 and chU% > 0) then
+    View(vSample%);
+    
+    if (chUSav% = 0) then
+        ' Saving for the first time
+        var list%[3];
+        ChanList(list%[], 0x80); 'List unused channels
+        if list%[0] >= 2 then
+            ' Found at least 2 unused channels
+            chUSav% := list%[1];
+            chMarkerSav% := list%[2];
+            
+            ' Save for the first time
+            MemSave(chU%, chUSav%);
+            MemSave(chU%, chMarkerSav%);
+        else
+            PrintLog("Error saving data (no unused channels available)!");
+        endif;
+    else
+        ' Append to current channels
+        MemSave(chU%, chUSav%, -1, 1);
+        MemSave(chU%, chMarkerSav%, -1, 1);
+    endif;
+    
+    ' Move reference cursors to new channels
+    MoveHCursors%(chU%, chUSav%);
+    
+    ' Update UI to signal user that we have saved successfully
+    ChanShow(chUSav%);
+    ChanShow(chMarkerSav%);
+    ChanHide(chU%);
+    ChanHide(chMarker%);
+endif;
+
+SaveLog%();
+
+return 1;
+end;
+
+
+
+' ==============================================================================
+' Handler functions
+
+Func OptimiseView%();
+' Optimize Y range and channel visibility
+
+' If not in a time view, do nothing
+if (ViewKind() <> 0) then
+    return 1;
+endif;
+
+'FIXME: Hide unlabeled channels
+'ChanHide(1, 3, 5, 7, 8);
+
+' Optimise Y range of visible channels for entire time range
+Optimise(-2, 0);
+
+' Move Stim channel to bottom
+'ChanOrder(1,1,10);
+
+return 1;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func Configure%();
+' Prompt for configurations
+DlgCreate("Control parameters");
+DlgReal(1, "Controlled frequency", 4, 100);
+DlgReal(2, "Pause before experiment (s)", 0, 3600);
+DlgReal(3, "MPC duration (s)", 0, 3600);
+DlgReal(4, "Minimum stimulation threshold (V)", 0, 5);
+DlgReal(5, "Stimulation limit (V, peak-to-peak)", 0, 5);
+DlgReal(6, "Reference target power (mV)", 0, 5);
+'Test
+'var ret% := DlgShow(freq, waitBefore, waitMPC, vThres, umax, ref);
+'if (ret% = 0) then
+'    'Dialog canceled
+'    return 1;
+'endif;
+
+'TODO: Warn about invalid configurations (eg, vOpenLoop > ulim, vThres+ulim > 5)
+
+'TEST
+'if SampleStatus() = -1 then
+'    'No sampling window active, start one with the current configuration
+'    FileNew(0, 3);  'Create sampling window and make it visible
+'endif;
+
+'FrontView(-1);
+vSample% := SampleHandle(0);
+
+'Test
+var list%[2];
+ViewList(list%, 1);
+vSample% := list%[1];
+
+'TODO: Verify sampling and sequencer parameters
+
+' Initialize memory channels for control action
+'TODO: check if channel already exists in current file (if restarting script)
+if chU% = 0 then
+    View(vSample%);
+    chU% := MemChan(1, 0, tLoop);       'Create waveform channel
+    if chU% <= 0 then                   'Created OK?
+        PrintLog("Error opening 'u' channel (%d)\n", chU%);
+        return 1;
+    endif;
+    ChanTitle$(chU%, "U");
+    ChanUnits$(chU%, "V");
+    ChanComment$(chU%, "Control action");
+    ChanShow(chU%);                     'display new channel
+endif;
+
+if chMarker% = 0 then
+    View(vSample%);
+    chMarker% := MemChan(5);            'Create marker channel
+    if chMarker% <= 0 then              'Created OK?
+        PrintLog("Error opening marker channel (%d)\n", chMarker%);
+        return 1;
+    endif;
+    ChanTitle$(chMarker%, "MPC");
+    ChanComment$(chMarker%, "MPC timing markers");
+    ChanShow(chMarker%);                'display new channel
+endif;
+
+' Initialize sampler sequence
+SampleSequencer("CL_seq.pls");
+
+isConfigured% := 1;
+
+return 1;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func Start%();
+
+if not isConfigured% then
+    Configure%();
+endif;
+
+if SampleStatus() = 0 then
+    'Sampling window is ready but inactive, start sampling
+    'TEST
+    '    SampleStart();  'Start sampling immediately
+    Seconds(0,1);
+    '
+endif;
+
+' Initialize IPC and lockfile
+InitMPC%();
+
+' Show sampling window and memory channels (if hidden)
+View(vSample%);
+ChanShow(chU%);
+ChanShow(chMarker%);
+
+'Test
+PrintLog("Start: %f\n", Now());
+
+' Update toolbar
+UpdateToolbar%();
+return 1;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func InitMPC%();
+
+FilePathSet(pathBase$, 0, 1);   ' set current dir, create dir
+
+if (isMPCReady% = 0) then
+    vFileL% := FileOpen(pathLock$,  9, 1);  'binary, write (new file)
+    vFileY% := FileOpen(pathFileY$, 9, 1);  'binary, write (new file)
+    vFileU% := FileOpen(pathFileU$, 9, 0);  'binary, read (existing file)
+    
+    isMPCReady% := 1;
+endif;
+
+end;
+
+
+' ------------------------------------------------------------------------------
+Func StopMPC%();
+
+' Check whether MPC is active
+if (isMPCReady%) then
+    ' Close output file
+    View(vFileY%);
+    FileClose();
+    vFileY% := 0;
+    
+    ' Close input file
+    View(vFileU%);
+    FileClose();
+    vFileU% := 0;
+    
+    ' Close and delete lockfile
+    View(vFileL%);
+    FileClose();
+    FileDelete(pathLock$);
+    vFileL% := 0;
+    
+    isMPCReady% := 0;
+endif;
+
+end;
+
+
+' ------------------------------------------------------------------------------
+Func UpdateMPC%();
+
+var n%, pos%, ret%; 'auxiliary variables
+
+' Read control parameters
+View(vFileU%);
+n% := BReadSize(8, bufferU); '64-bit double
+'PrintLog("Read %d\n", ret%);
+
+if (n% > 0) then
+    ' Set control parameter
+    u := bufferU[n%-1]; 'read last value
+    ret% := 1;
+endif;
+
+' Update marker channel
+View(vSample%);
+var buffer[1]; buffer[0] := n%;
+MemSetItem(chMarker%, 0, Now(), markReadU%, buffer);
+
+return ret%;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func UpdateUKF%();
+
+var ret%, pos%, n%, buffer[1]; 'auxiliary variables
+
+' Copy channel data to array
+View(vSample%);
+ret% := ChanData(ch%, bufferSample, tLast+ts, tCur);
+'PrintLog("Sampled %d\n", ret%);
+
+' Update marker channel
+'View(vSample%);
+buffer[0] := ret%;
+MemSetItem(chMarker%, 0, Now(), markSampleY%, buffer);
+
+if (ret% > 0) then
+    'FIXME: Downsample
+    n% := (ret%-1)/nStep% + 1; 'truncated
+    var i%;
+    var bufferY[n%];
+    for i% := 0 to (n%-1) do
+        bufferY[i%] := bufferSample[i%*nStep%];
+    next;
+    
+    ' Write array to file
+    View(vFileY%);
+    BWriteSize(8, bufferY); '64-bit double
+    pos% := BSeek(0, 2); 'move to end of file (flush)
+endif;
+
+' Update marker channel
+View(vSample%);
+buffer[0] := n%;
+MemSetItem(chMarker%, 0, Now(), markWriteY%, buffer);
+
+return 1;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func RunMPC%();
+' Initialize main loop
+tCur := Trunc(Now() + 1.0);  'Start at next integer second
+tLast := tCur;
+var tEnd := tCur + waitMPC;
+
+' Wait to start time
+Yield(tCur - Now()); 'sleep (no wait if negative)
+
+'Run
+PrintLog("Start MPC (tCur: %f): %f\n", tCur, Now());
+while tCur <= tEnd do
+    'PrintLog("Run (tCur: %f): %f (lag: %f / %f ms)\n", tCur, Now(), (Now()-tCur)*1000.0, tLoop*1000.0);
+    var ret% := UpdateMPC%();
+    if (ret%) then
+        UpdateSequencer%();
+    endif;
+    
+    UpdateUKF%();
+    
+    'FIXME: interrupt with SampleSeqVar?
+    
+    tLast := tCur;
+    tCur := tCur + tLoop;
+    
+    if (tCur > Now()) then
+        Yield(tCur - Now()); 'sleep (no wait if negative)
+    else
+        PrintLog("Exceeded loop time! (tCur: %f): %f\n", tCur, Now());
+    endif;
+wend;
+
+' Clear IPC and lockfile
+PrintLog("Stop MPC (tLast: %f): %f\n", tLast, Now());
+StopMPC%();
+
+return 1;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func StartStim%();
+' Send start sampler sequence
+SampleKey("S");
+
+' Set stimulation state
+isStimOn% := 1;
+
+' Update toolbar
+UpdateToolbar%();
+return 1;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func StopStim%();
+' Finalize sampler sequence
+SampleKey("Q");
+
+' Reset stimulation state
+isStimOn% := 0;
+
+' Update toolbar
+UpdateToolbar%();
+return 1;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func Stop%();
+' Stop stimulation
+StopStim%();
+
+'FIXME: Stop MPC (if running)
+StopMPC%();
+
+' Save data
+Save%();
+
+' Update toolbar
+UpdateToolbar%();
+return 1;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func Quit%();
+' Stop sampling and quit toolbar
+Stop%();
+SampleStop();
+return 0;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func UpdateSequencer%();
+' Update sequencer variables
+var amp := 0.5 * u;
+SampleSeqVar(1, vHz%(freq, msPerStep));
+SampleSeqVar(2, vSz%(amp, DACscale));
+SampleSeqVar(3, vDAC32%(vThres + amp, DACscale, DACoffset));
+
+if (not isStimOn%) then
+    StartStim%();
+endif;
+
+' Update data and marker channels
+View(vSample%);
+var buffer[1]; buffer[0] := u;
+MemSetItem(chMarker%, 0, Now(), markSeqU%, buffer);
+MemSetItem(chU%, 0, tCur, u);
+
+return 1;
+end;
+
+
+
+' ------------------------------------------------------------------------------
+Func UpdateToolbar%();
+' Enables/disables toolbar buttons according to current state
+'ToolbarEnable(3, (not isActive%)); 'Run MPC
+
+return 1;
+end;
+
+
+
+' ------------------------------------------------------------------------------
+Func Idle%()
+'Wait for time to start
+if (Now() >= waitBefore - 1.0) then
+    RunMPC%();
+    return Quit%();
+endif;
+' Keep script running
+return 1;
+end;
+
+' ==============================================================================
+' Initialize toolbar with idle function
+
+ClearLog%();
+
+ToolbarSet(5, "Optimise view", OptimiseView%);
+ToolbarSet(4, "Configure", Configure%);
+ToolbarSet(3, "Start MPC", RunMPC%);
+ToolbarSet(2, "Stop", Stop%);
+ToolbarSet(1, "Quit", Quit%);
+ToolbarSet(0, "Idle", Idle%);
+
+' Open configuration dialog and run
+Start%();
+Toolbar("MPC", 0x03FF);      'Display toolbar, allow all user actions

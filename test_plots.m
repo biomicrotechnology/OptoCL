@@ -1,7 +1,7 @@
 %% Load data
 fid = fopen('C:\MPC\test.smr');
-[y,h] = SONGetADCChannel(fid, 1, 'scale');
-ch0 = 1;
+[y,h] = SONGetADCChannel(fid, 9, 'scale');
+ch0 = 0;
 u = SONGetRealMarkerChannel(fid, ch0+1);
 r = SONGetRealMarkerChannel(fid, ch0+2);
 w = SONGetRealMarkerChannel(fid, ch0+3);
@@ -17,7 +17,7 @@ ty = h.start + ts*(0:ny-1);
 t0 = l.timings(1) + ts;
 t_ = t + t0;
 
-%%
+%% Plot timings
 fig = figure;
 h_ = 6; w_ = 1;
 ha = gobjects(h_,w_);
@@ -37,3 +37,54 @@ for p = 1:length(markers_)
 end
 
 linkaxes(ha, 'x');
+
+
+%% Plot optimal control fit
+ukf_h = @ukf.MeasurementFcn;
+mpc_u = @MPC_update;
+g_ = [.1 -.1];
+b = 3;
+
+fig = clf;
+h = 2;
+w = 3;
+
+a_ = -.1:.05:1.1;
+r_ = -2*abs(g):.01:2*abs(g);
+
+for p = 1:h
+    g = g_(p);
+    x_ = [g b];
+    subplot(h,w,(p-1)*w+1);
+    plot(a_, arrayfun(@(a) ukf_h(x_,[a 1]), a_));
+    ylim(abs(g)*[-1 1]);
+    xlabel('a');
+    ylabel('a_y');
+    grid on;
+
+    subplot(h,w,(p-1)*w+2);
+    plot(r_, arrayfun(@(r) mpc_u(x_,r), r_));
+    xlabel('r');
+    ylabel('a');
+    grid on;
+    title(sprintf('g: %f, b: %f', g, b));
+
+    subplot(h,w,(p-1)*w+3);
+    plot(r_, arrayfun(@(r) ukf_h(x_,[mpc_u(x_,r) 1]), r_));
+    ylim(abs(g)*[-1 1]);
+    ylabel('a_y');
+    xlabel('r');
+    grid on;
+end
+
+
+%% Functions
+function a = MPC_update(x, r)
+    g = x(1);
+    b = x(2);
+    
+    % Calculate desired control
+    %r = g*(1 - exp(-b*a));
+    a = -log(max(0, 1 - r/g)) / b;
+    a = min(max(0.0, a), 1.0);
+end

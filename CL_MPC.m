@@ -5,10 +5,11 @@
 clear;
 fclose('all');
 
+
 %% Config
 % General
 fs = 200;   % sampling rate for UKF/MPC
-r = 0.2;    % target reference
+r = 0.1;    % target reference
 f = 8;      % Hz
 dt = 1/fs;
 
@@ -20,8 +21,11 @@ filename_lock = [basepath 'lock'];
 
 
 %% Initialize UKF
-X0 = [ 0.2 7 ];
-ukf = UKF_setup(X0);
+%    [ g         b      ]
+X0 = [ 0.1575    3.0171 ];  % initial estimate
+S  = 1e-8 * [ 1 1 ];        % noise covariances
+W  = 1e-2;                  % measurement noise variance
+ukf = UKF_setup(X0, S, W);
 
 % Create output file
 fid_u = fopen(filename_u, 'w');
@@ -42,6 +46,7 @@ while true
     end
     pause(1e-3); % sleep 1 ms
 end
+
 
 %% Read
 tic
@@ -70,7 +75,7 @@ while true
         pause(1e-6); % sleep 1 µs
         continue;
     end
-    ii = i-1 + (1:n);
+    ii = i + (0:n-1);
     times(1,ii) = now;
     %fprintf('Read %d values\n', n);
 
@@ -118,6 +123,7 @@ while true
 end
 toc
 
+
 %% Save data
 % Trim data buffer to last cycle
 N = i-1;
@@ -136,39 +142,49 @@ fprintf('Saved %s\n', matfile);
 %% Plot
 t = dt*(1:N);
 y_pred = nan(1,N);
-u = [a_mpc; cos(2*pi*f*dt*(0:N-1))];
+a_calc = nan(1,N);
+y_amp = nan(1,N);
 for k = 1:N
-    y_pred(k) = ukf.MeasurementFcn(x_ukf(:,k), u(:,k));
+    y_pred(k) = ukf.MeasurementFcn(x_ukf(:,k), [a_mpc(k); cos(2*pi*f*dt*(k-1))]);
+    y_amp(k) = ukf.MeasurementFcn(x_ukf(:,k), [a_mpc(k); 1]);
+    
+    a_calc(k) = abs(-log(1 - r/x_ukf(1,k)) / x_ukf(2,k));
 end
 
 figure;
-h = 4; w = 1;
+h = 5; w = 1;
 ha = gobjects(h,w);
 ha(1) = subplot(h,w,1);
-plot(t, u);
+plot(t, [a_mpc; a_calc]);
 ylabel('u');
 
 ha(2) = subplot(h,w,2);
 plot(t, [y_meas; y_pred]);
 ylabel('y');
 
-ha(3) = subplot(h,w,3);
+ha(3) = subplot(h,w,3); hold on;
+plot(t, y_amp);
+plot(xlim, [r r], '--');
+ylabel('y_amp, r');
+
+ha(4) = subplot(h,w,4);
 plot(t, x_ukf(1,:));
 ylabel('g');
 
-ha(4) = subplot(h,w,4);
+ha(5) = subplot(h,w,5);
 plot(t, x_ukf(2,:));
 ylabel('b');
 
 linkaxes(ha, 'x');
+
 
 %% Functions
 function a = MPC_update(x, r)
     g = x(1);
     b = x(2);
     
-%     % Calculate desired control
+    % Calculate desired control
     %r = g*(1 - exp(-b*a));
-    a = -log(1 - r/g) / b;
-    a = min(max(0.0, abs(a)), 1.0);
+    a = -log(max(0, 1 - r/g)) / b;
+    a = min(max(0.0, a), 1.0);
 end

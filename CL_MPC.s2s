@@ -1,47 +1,65 @@
+' README
+'
+' # Configuration (for real-time performance)
+' ## Spike 2
+' - In "Edit -> "Edit preferences..." -> "Scheduler", set values to (1, 0, 0).
+' ## Windows Task Manager
+' - In "Details", set priority of "sonview.exe" and "MATLAB.exe" to "Realtime".
+'
+' # Running
+' 1) Open MATLAB, run "CL_MPC.m".
+' 2) Run this script.
+'
+' ==============================================================================
 #include "seqlib.s2s"       'Default sequencer helpers (eg, vdac32%)
 
 ' ------------------------------------------------------------------------------
 ' Constant definitions
-const tLoop := 0.005;       'Update control every 0.005s (200 Hz)
+const tLoop := 0.025;       'Update control every 0.005s (200 Hz)
 const fs% := 5e3;           'Sampling frequency
+const ts := 1.0/fs%;        'Sampling period
 const nStep% := 25;         'Number of samples to skip (downsample)
 
 const msPerStep := 0.01;    'Sequencer configuration
 const DACscale  := 1;       'Sequencer configuration
 const DACoffset := 0;       'Sequencer configuration
+const varFreq% := 1;        'Sequencer variable number
+const varSize% := 2;        'Sequencer variable number
+const varOffs% := 3;        'Sequencer variable number
 
 const pathBase$ := "C:\\MPC";                   ' Path for MATLAB IPC files
 const pathFileY$ := pathBase$ + "\\" + "y.bin"; ' Path for MATLAB IPC files
 const pathFileU$ := pathBase$ + "\\" + "u.bin"; ' Path for MATLAB IPC files
 const pathLock$  := pathBase$ + "\\" + "lock";  ' Path for MATLAB IPC files
 
+const chMarker% := 32;      'DigMark channel (for reading sequencer markers)
+
 ' ------------------------------------------------------------------------------
 ' Configuration defaults (initial values)
-var ch% := 1;               'Channel to control
+var ch% := 12;              'Channel to control
 var freq := 8;              'Frequency to control
-var waitBefore := 5;        'Delay before experiment begin (s)
-var waitMPC:= 10;           'MPC duration (s)
-var vThres := 0.5;          'Minimum stimulation threshold (V)
-var vOpenLoop := 1.0;       'Open-loop stimulation amplitude (V pk-pk)
-var umax := 4.0;            'Maximum stimulation amplitude for PID (V pk-pk)
-var ref := 0.2;             'Reference target for closed-loop control (mV)
+var waitPre := 30;          'Delay before experiment (s)
+var waitMPC:= 120;          'MPC duration (s)
+var waitPos := 30;          'Delay after experiment (s)
+var vThres := 0.1;          'Minimum stimulation threshold (V)
+var umax := 1.0;            'Maximum stimulation amplitude for PID (V pk-pk)
 
 ' ------------------------------------------------------------------------------
 ' General state variables
 var vSample%;               'View handle of the main time window
-var chU%;                   'Memory channels for results
-var chUSav%;                'Data channels to save results from memory
 var isConfigured%;          'Configuration OK (0 = false)
-var isActive%;              'Main loop active (0 = false)
 var isStimOn%;              'Stimulation sequence active (0 = false)
-var isOpenLoop%;            'Open-loop stimulation active (0 = false)
-var isClosedLoop%;          'Closed-loop control active (0 = false)
-var isMPCActive%;           'MPC active (0 = false)
-var uRamp;                  'Fraction of vOpenLoop to apply during ramp (0 - 1)
+var isMPCReady%;            'MPC active (0 = false)
+
+var chSeqValueU%;           'Values sent to DAC sequencer (control u)
+var chReadCount%;           'Number of values read (control u)
+var chSampleCount%;         'Number of values sampled (sampled y)
+var chWriteCount%;          'Number of values written (sampled y)
+var chLoopTime%;            'Time spent in loop (s)
+var chStateSav%[5];         'Data channels to save results from memory
 
 const nBuffer% := 1024;
-var bufferCh[nBuffer%*nStep%];
-var bufferY[nBuffer%];
+var bufferSample[nBuffer%*nStep%];
 var bufferU[nBuffer%];
 
 var vFileL%;
@@ -50,7 +68,16 @@ var vFileU%;
 
 ' ------------------------------------------------------------------------------
 ' Controller state variables
-var tCur, tLast, y, u;   'set to zero
+var tStartMPC, tCur, tLast, tLastRead, y, u;  'set to zero
+
+' ------------------------------------------------------------------------------
+' Running sequence state variables
+var runStep%, tNextStep;
+' Steps:
+'  -1: manual mode
+'   0: pre
+'   1: MPC
+'   2: post
 
 ' ==============================================================================
 ' Helper functions
@@ -102,37 +129,54 @@ end;
 
 
 ' ------------------------------------------------------------------------------
-Func Save%();
+Func SaveChannel%(chMem%, chSav%);
 ' Save memory channels to file, if available
-if (vSample% > 0 and chU% > 0) then
-    View(vSample%);
-    
-    if (chUSav% = 0) then
-        'Saving for the first time
-        var list%[126];
-        ChanList(list%[], 128); 'List unused channels
-        if list%[0] >= 1 then
-            'Found at least 2 unused channels
-            chUSav% := list%[1];
 
-            'Save for the first time
-            MemSave(chU%, chUSav%);
-        else
-            PrintLog("Error saving data (no unused channels available)!");
-        endif;
-    else
-        'Append to current channels
-        MemSave(chU%, chUSav%, -1, 1);
-    endif;
-    
-    'Move reference cursors to new channels
-    MoveHCursors%(chU%, chUSav%);
-    
-    'Update UI to signal user that we have saved successfully
-    ChanShow(chUSav%);
-    ChanHide(chU%);
+' Check that window and channels exist
+if (vSample% = 0 or chMem% = 0) then
+    return 0;
 endif;
 
+' Create channel if needed
+View(vSample%);    
+if (chSav% = 0) then
+    'List unused channels
+    var list%[2];
+    ChanList(list%[], 0x80); 
+    if list%[0] < 1 then
+        PrintLog("Error saving data (not enough channels available)!");
+        return -1;
+    endif;
+    
+    ' Store channel number
+    chSav% := list%[1];
+endif;
+
+' Save data
+MemSave(chMem%, chSav%, 0, 1);
+
+' Move reference cursors to new channels
+MoveHCursors%(chMem%, chSav%);
+
+' Update UI to signal user that we have saved successfully
+ChanHide(chMem%);
+ChanShow(chSav%);
+YRange(chSav%, YLow(chMem%), YHigh(chMem%));
+
+return chSav%;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func Save%();
+' Save state variable channels
+chStateSav%[0] := SaveChannel%(chSeqValueU%,   chStateSav%[0]);
+chStateSav%[1] := SaveChannel%(chReadCount%,   chStateSav%[1]);
+chStateSav%[2] := SaveChannel%(chWriteCount%,  chStateSav%[2]);
+chStateSav%[3] := SaveChannel%(chSampleCount%, chStateSav%[3]);
+chStateSav%[4] := SaveChannel%(chLoopTime%,    chStateSav%[4]);
+
+'Save log
 SaveLog%();
 
 return 1;
@@ -173,8 +217,7 @@ DlgReal(2, "Pause before experiment (s)", 0, 3600);
 DlgReal(3, "MPC duration (s)", 0, 3600);
 DlgReal(4, "Minimum stimulation threshold (V)", 0, 5);
 DlgReal(5, "Stimulation limit (V, peak-to-peak)", 0, 5);
-DlgReal(6, "Reference target power (mV)", 0, 5);
-var ret% := DlgShow(freq, waitBefore, waitMPC, vThres, umax, ref);
+var ret% := DlgShow(freq, waitPre, waitMPC, vThres, umax);
 if (ret% = 0) then
     'Dialog canceled
     return 1;
@@ -187,24 +230,17 @@ if SampleStatus() = -1 then
     FileNew(0, 3);  'Create sampling window and make it visible
 endif;
 
-FrontView(-1);
-vSample% := View();
+'FrontView(-1);
+vSample% := SampleHandle(0);
 
 'TODO: Verify sampling and sequencer parameters
 
-' Initialize memory channels for results
-'TODO: check if channel already exists in current file (if restarting script)
-if chU% = 0 then
-    chU% := MemChan(1, 0, tLoop);       'Create waveform channel
-    if chU% <= 0 then                   'Created OK?
-        PrintLog("Error opening PID channel (%d)\n", chU%);
-        return 1;
-    endif;
-    ChanTitle$(chU%, "U");
-    ChanUnits$(chU%, "V");
-    ChanComment$(chU%, "Control action");
-    ChanShow(chU%);                     'display new channel
-endif;
+' Initialize memory channels for state variables
+chSeqValueU%   := CreateMemoryChannel%(chSeqValueU%,   "u",        "", "", 0.0, 1.0);
+chReadCount%   := CreateMemoryChannel%(chReadCount%,   "read",    "#", "", 0.0, 2.0);
+chSampleCount% := CreateMemoryChannel%(chSampleCount%, "sampled", "#", "", 0.0, 2.0*fs%*tLoop);
+chWriteCount%  := CreateMemoryChannel%(chWriteCount%,  "written", "#", "", 0.0, 2.0*fs%*tLoop/nStep%);
+chLoopTime%    := CreateMemoryChannel%(chLoopTime%,    "loop",    "s", "", 0.0, 2.0*tLoop);
 
 ' Initialize sampler sequence
 SampleSequencer("CL_seq.pls");
@@ -212,6 +248,36 @@ SampleSequencer("CL_seq.pls");
 isConfigured% := 1;
 
 return 1;
+end;
+
+' ------------------------------------------------------------------------------
+Func CreateMemoryChannel%(ch%, title$, unit$, comment$, dispMin, dispMax)
+'Creates a memory channel with the given parameters
+
+' Do nothing if channel already exists
+if (ch% <> 0) then
+    return ch%;
+endif;
+
+View(vSample%);
+
+'Create a RealMark channel, for variable and precise timing
+ch% := MemChan(7, 1);   
+if ch% <= 0 then                    'Created OK?
+    PrintLog("Error creating '%s' channel (%d)\n", title$, ch%);
+    return 0;
+endif;
+
+ChanTitle$(ch%, title$);
+ChanUnits$(ch%, unit$);
+ChanComment$(ch%, comment$);
+
+'Display new channel
+ChanShow(ch%);
+YRange(ch%, dispMin, dispMax);
+
+
+return ch%;
 end;
 
 
@@ -227,8 +293,18 @@ if SampleStatus() = 0 then
     SampleStart();  'Start sampling immediately
 endif;
 
-' Show memory channels (if hidden)
-ChanShow(chU%);
+' Initialize IPC and lockfile
+InitMPC%();
+
+' Show sampling window and memory channels (if hidden)
+View(vSample%);
+ChanShow(chSeqValueU%);
+ChanShow(chReadCount%);
+ChanShow(chWriteCount%);
+ChanShow(chSampleCount%);
+ChanShow(chLoopTime%);
+
+PrintLog("Start: %f\n", Now());
 
 ' Update toolbar
 UpdateToolbar%();
@@ -239,14 +315,20 @@ end;
 ' ------------------------------------------------------------------------------
 Func InitMPC%();
 
-FilePathSet(pathBase$, 0, 1);   ' set current dir, create dir
+' Set current dir (create if non-existent)
+FilePathSet(pathBase$, 0, 1);
 
-if (isMPCActive% = 0) then
+' Open files for IPC (inter-process communication)
+if (isMPCReady% = 0) then
     vFileL% := FileOpen(pathLock$,  9, 1);  'binary, write (new file)
     vFileY% := FileOpen(pathFileY$, 9, 1);  'binary, write (new file)
     vFileU% := FileOpen(pathFileU$, 9, 0);  'binary, read (existing file)
+    
+    ' Read initial control parameters
+    View(vFileU%);
+    BReadSize(8, u); '64-bit double
         
-    isMPCActive% := 1;
+    isMPCReady% := 1;
 endif;
 
 end;
@@ -256,24 +338,24 @@ end;
 Func StopMPC%();
 
 ' Check whether MPC is active
-if (isMPCActive%) then
+if (isMPCReady%) then
     ' Close output file
     View(vFileY%);
     FileClose();
     vFileY% := 0;
-
+    
     ' Close input file
     View(vFileU%);
     FileClose();
     vFileU% := 0;
-
+    
     ' Close and delete lockfile
     View(vFileL%);
     FileClose();
     FileDelete(pathLock$);
     vFileL% := 0;
     
-    isMPCActive% := 0;
+    isMPCReady% := 0;
 endif;
 
 end;
@@ -282,45 +364,56 @@ end;
 ' ------------------------------------------------------------------------------
 Func UpdateMPC%();
 
-var ret%, pos%; 'auxiliary variables
+var n%, pos%; 'auxiliary variables
 
 ' Read control parameters
 View(vFileU%);
-ret% := BReadSize(8, bufferU); '64-bit double
-'PrintLog("Read %d\n", ret%);
+n% := BReadSize(8, bufferU); '64-bit double
+'PrintLog("Read %d\n", n%);
 
-if (ret% > 0) then
+if (n% > 0) then
     ' Set control parameter
-    u := bufferU[ret%-1]; 'read last value
-    return 1;
+    u := bufferU[n%-1]; 'read last value
 endif;
 
-return 0;
+' Update marker channel
+UpdateStateCh%(chReadCount%, Now(), n%);
+
+return n%;
 end;
 
 
 ' ------------------------------------------------------------------------------
 Func UpdateUKF%();
 
-var ret%, pos%; 'auxiliary variables
+var ret%, pos%, n%; 'auxiliary variables
 
 ' Copy channel data to array
 View(vSample%);
-ret% := ChanData(ch%, bufferCh, tLast, tCur);
+ret% := ChanData(ch%, bufferSample, tLastRead+ts, tCur);
 'PrintLog("Sampled %d\n", ret%);
 
-'FIXME: Downsample
-var n% := Trunc(ret%/nStep%);
-var i%;
-for i% := 0 to n% do
-    bufferY[i%] := bufferCh[i%*nStep%];
-next;
+' Update marker channel
+UpdateStateCh%(chSampleCount%, Now(), ret%);
 
-' Write array to file
-View(vFileY%);
-ret% := BWriteSize(8, bufferY); '64-bit double
-pos% := BSeek(0, 2); 'move to end of file (flush)
-'PrintLog("Wrote %d (pos: %d bytes)\n", ret%, pos%);
+if (ret% > 0) then
+    'FIXME: Downsample
+    n% := ret%/nStep%;  'truncated
+    var i%;
+    var bufferY[n%];
+    for i% := 0 to (n%-1) do
+        bufferY[i%] := bufferSample[(i%+1)*nStep%-1];
+    next;
+    tLastRead := tLastRead + n%*nStep%*ts;
+    
+    ' Write array to file
+    View(vFileY%);
+    BWriteSize(8, bufferY); '64-bit double
+    pos% := BSeek(0, 2); 'move to end of file (flush)
+endif;
+
+' Update marker channel
+UpdateStateCh%(chWriteCount%, Now(), n%);
 
 return 1;
 end;
@@ -328,37 +421,68 @@ end;
 
 ' ------------------------------------------------------------------------------
 Func RunMPC%();
-' Initialize IPC and lockfile
-InitMPC%();
+' Initialize and start sequencer
+tCur := Now();
+UpdateSequencer%();
+StartStim%();
 
-' Initialize main loop
-tCur := Trunc(Now() + 1.0);  'Start at next integer second
-tLast := tCur;
-var tEnd := tCur + waitMPC;
+' Initialize state
+Yield(tCur+tLoop - Now());  'wait for marker
+tStartMPC := LastTime(chMarker%, Now());
+PrintLog("Start MPC: %f\n", tStartMPC);
+tLast := tStartMPC;
+tLastRead := tLast;
 
-' Start sampling (if not running)
-Start%();
+' Run main loop
+var nLoops% := Ceil(waitMPC/tLoop);
+var i%;
+for i% := 1 to nLoops% do
+    tCur := tStartMPC + i%*tLoop;
+    
+    ' Sleep (no wait if negative)
+    Yield(tCur - Now());
 
-'Run
-while tCur <= tEnd do
+    ' Break if sampling is interrupted
+    if (SampleStatus() <> 2) then
+        break;
+    endif;
+    
+    ' Write sampled values
+    UpdateUKF%();
+    
+    ' Read control action
     var ret% := UpdateMPC%();
     if (ret%) then
         UpdateSequencer%();
     endif;
     
-    UpdateUKF%();
-    
-    'FIXME: interrupt with SampleSeqVar?
-    
-    tCur := tCur + tLoop;
-    if (tCur < Now()) then
-        Yield(tCur - Now());
+    ' Update state variables
+    var tSpent := (Now() - tCur);
+    UpdateStateCh%(chLoopTime%, tCur, tSpent);
+    if (tSpent > tLoop) then
+        PrintLog("Exceeded loop time! (tCur: %f): %f\n", tCur, tSpent);
     endif;
-wend;
+    
+    ' Continue with next loop
+    tLast := tCur;
+    tCur := tCur + tLoop;
+    
+next;
+
+PrintLog("Stop MPC (tLast: %f): %f\n", tLast, Now());
 
 ' Clear IPC and lockfile
 StopMPC%();
 
+return 1;
+end;
+
+
+' ------------------------------------------------------------------------------
+Func UpdateStateCh%(ch%, t, value);
+View(vSample%);
+var buffer[1]; buffer[0] := value;
+MemSetItem(ch%, 0, t, 1, buffer);
 end;
 
 
@@ -408,21 +532,9 @@ end;
 
 
 ' ------------------------------------------------------------------------------
-Func Reset%();
-' Clear state variables for new recording
-Stop%();
-chU% := 0;
-chUSav% := 0;
-isConfigured% := 0;
-
-return 1;
-end;
-
-
-' ------------------------------------------------------------------------------
 Func Quit%();
-' Reset, stop sampling and quit toolbar
-Reset%();
+' Stop sampling and quit toolbar
+Stop%();
 SampleStop();
 return 0;
 end;
@@ -432,33 +544,63 @@ end;
 Func UpdateSequencer%();
 ' Update sequencer variables
 var amp := 0.5 * u;
-SampleSeqVar(1, vHz%(freq, msPerStep));
-SampleSeqVar(2, vSz%(amp, DACscale));
-SampleSeqVar(3, vDAC32%(vThres + amp, DACscale, DACoffset));
+SampleSeqVar(varFreq%, vHz%(freq, msPerStep));
+SampleSeqVar(varSize%, vSz%(amp, DACscale));
+SampleSeqVar(varOffs%, vDAC32%(vThres + amp, DACscale, DACoffset));
 
-if (not isStimOn%) then
-    StartStim%();
-endif;
-
-' Update data channel
-View(vSample%);
-MemSetItem(chU%, 0, Now(), u);
-'Optimise(chU%);
+' Update data and marker channels
+UpdateStateCh%(chSeqValueU%, Now(), u);
 
 return 1;
 end;
-
 
 
 ' ------------------------------------------------------------------------------
 Func UpdateToolbar%();
 ' Enables/disables toolbar buttons according to current state
-ToolbarEnable(3, (not isMPCActive%)); 'Run MPC
+'ToolbarEnable(3, (not isActive%)); 'Run MPC
 
 return 1;
 end;
 
 
+' ------------------------------------------------------------------------------
+Func Idle%()
+' Update running sequence
+if (Now() >= tNextStep) then
+    docase
+    case runStep% = 0 then
+        ' pre
+        tNextStep := tNextStep + waitPre;
+        runStep% := 1;
+        
+    case runStep% = 1 then
+        ' MPC
+        RunMPC%();
+        ' OL
+        'u := 0.3341;
+        'UpdateSequencer%();
+        'StartStim%();
+        tNextStep := tNextStep + waitMPC;
+        runStep% := 2;
+        
+    case runStep% = 2 then
+        ' post
+        StopStim%();
+        tNextStep := tNextStep + waitPos;
+        runStep% := 3;
+        
+    case runStep% = 3 then
+        ' end
+        Quit%();
+        return 0;
+        
+    endcase;
+endif;
+
+' Keep script running
+return 1;
+end;
 
 ' ==============================================================================
 ' Initialize toolbar with idle function
@@ -470,8 +612,8 @@ ToolbarSet(4, "Configure", Configure%);
 ToolbarSet(3, "Start MPC", RunMPC%);
 ToolbarSet(2, "Stop", Stop%);
 ToolbarSet(1, "Quit", Quit%);
-Reset%();
+ToolbarSet(0, "Idle", Idle%);
 
 ' Open configuration dialog and run
-Configure%();
+Start%();
 Toolbar("MPC", 0x03FF);      'Display toolbar, allow all user actions

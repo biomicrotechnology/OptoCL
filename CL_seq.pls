@@ -1,5 +1,8 @@
 ;Helper constants
 Ch          =      0               ;DAC channel to use
+ChTSL1      =      2
+ChTSL2      =      3
+DACVcc      =      5
 DACOff      =      0               ;Value to set the DAC to when "off" (in V)
 NLoop       =      8*300           ;Maximum stimulation duration (in number of loops)
 
@@ -15,6 +18,8 @@ NLoop       =      8*300           ;Maximum stimulation duration (in number of l
 ;Program start
 E0:     'Q  RATE   Ch,0            ;Stop any ongoing stimulation (Keyboard shortcut 'Q')
             DAC    Ch,DACOff       ;Set DAC value to "off"
+            DAC    ChTSL1,DACVcc   ;Set TSL257 DAC value to "on"
+            DAC    ChTSL2,DACVcc   ;Set TSL257 DAC value to "on"
             MARK   0               ;Digital mark 0
 
             HALT                   ;End of sequence

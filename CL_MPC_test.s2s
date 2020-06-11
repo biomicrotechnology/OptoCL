@@ -15,7 +15,7 @@
 
 ' ------------------------------------------------------------------------------
 ' Constant definitions
-const tLoop := 0.005;       'Update control every 0.005s (200 Hz)
+const tLoop := 0.025;       'Update control every 0.005s (200 Hz)
 const fs% := 5e3;           'Sampling frequency
 const ts := 1.0/fs%;        'Sampling period
 const nStep% := 25;         'Number of samples to skip (downsample)
@@ -32,17 +32,17 @@ const pathFileY$ := pathBase$ + "\\" + "y.bin"; ' Path for MATLAB IPC files
 const pathFileU$ := pathBase$ + "\\" + "u.bin"; ' Path for MATLAB IPC files
 const pathLock$  := pathBase$ + "\\" + "lock";  ' Path for MATLAB IPC files
 
-
+const chMarker% := 32;      'DigMark channel (for reading sequencer markers)
 
 ' ------------------------------------------------------------------------------
 ' Configuration defaults (initial values)
-var ch% := 1;               'Channel to control
+var ch% := 12;              'Channel to control
 var freq := 8;              'Frequency to control
-var waitBefore := 5;        'Delay before experiment begin (s)
-var waitMPC:= 10;           'MPC duration (s)
-var vThres := 0.5;          'Minimum stimulation threshold (V)
-var umax := 4.0;            'Maximum stimulation amplitude for PID (V pk-pk)
-var ref := 0.2;             'Reference target for closed-loop control (mV)
+var waitPre := 30;          'Delay before experiment (s)
+var waitMPC:= 120;          'MPC duration (s)
+var waitPos := 30;          'Delay after experiment (s)
+var vThres := 0.1;          'Minimum stimulation threshold (V)
+var umax := 1.0;            'Maximum stimulation amplitude for PID (V pk-pk)
 
 ' ------------------------------------------------------------------------------
 ' General state variables
@@ -68,7 +68,16 @@ var vFileU%;
 
 ' ------------------------------------------------------------------------------
 ' Controller state variables
-var tCur, tLast, y, u;   'set to zero
+var tStartMPC, tCur, tLast, tLastRead, y, u;  'set to zero
+
+' ------------------------------------------------------------------------------
+' Running sequence state variables
+var runStep%, tNextStep;
+' Steps:
+'  -1: manual mode
+'   0: pre
+'   1: MPC
+'   2: post
 
 ' ==============================================================================
 ' Helper functions
@@ -81,7 +90,9 @@ View(vSample%);
 'TEST
 'return MaxTime(ch%);
 if tStart = -1 then tStart := Seconds(); endif;
-return Seconds() - tStart;
+var tNow := Seconds() - tStart;
+XRange(tNow-5, tNow);
+return tNow;
 '
 end;
 
@@ -214,8 +225,7 @@ DlgReal(2, "Pause before experiment (s)", 0, 3600);
 DlgReal(3, "MPC duration (s)", 0, 3600);
 DlgReal(4, "Minimum stimulation threshold (V)", 0, 5);
 DlgReal(5, "Stimulation limit (V, peak-to-peak)", 0, 5);
-DlgReal(6, "Reference target power (mV)", 0, 5);
-'Test
+'TEST
 'var ret% := DlgShow(freq, waitBefore, waitMPC, vThres, umax, ref);
 'if (ret% = 0) then
 '    'Dialog canceled
@@ -233,7 +243,7 @@ DlgReal(6, "Reference target power (mV)", 0, 5);
 'FrontView(-1);
 vSample% := SampleHandle(0);
 
-'Test
+'TEST
 var list%[2];
 ViewList(list%, 1);
 vSample% := list%[1];
@@ -312,7 +322,6 @@ ChanShow(chWriteCount%);
 ChanShow(chSampleCount%);
 ChanShow(chLoopTime%);
 
-'Test
 PrintLog("Start: %f\n", Now());
 
 ' Update toolbar
@@ -399,7 +408,7 @@ var ret%, pos%, n%; 'auxiliary variables
 
 ' Copy channel data to array
 View(vSample%);
-ret% := ChanData(ch%, bufferSample, tLast+ts, tCur);
+ret% := ChanData(ch%, bufferSample, tLastRead+ts, tCur);
 'PrintLog("Sampled %d\n", ret%);
 
 ' Update marker channel
@@ -407,12 +416,13 @@ UpdateStateCh%(chSampleCount%, Now(), ret%);
 
 if (ret% > 0) then
     'FIXME: Downsample
-    n% := (ret%-1)/nStep% + 1;  'truncated
+    n% := ret%/nStep%;  'truncated
     var i%;
     var bufferY[n%];
     for i% := 0 to (n%-1) do
-        bufferY[i%] := bufferSample[i%*nStep%];
+        bufferY[i%] := bufferSample[(i%+1)*nStep%-1];
     next;
+    tLastRead := tLastRead + n%*nStep%*ts;
     
     ' Write array to file
     View(vFileY%);
@@ -429,41 +439,55 @@ end;
 
 ' ------------------------------------------------------------------------------
 Func RunMPC%();
-' Initialize main loop
-tCur := Trunc(Now() + 1.0);  'Start at next integer second
-var tEnd := tCur + waitMPC;
-
-' Wait to start time
-Yield(tCur - Now()); 'sleep (no wait if negative)
-
-'Run
+' Initialize and start sequencer
+tCur := Now();
 UpdateSequencer%();
 StartStim%();
-PrintLog("Start MPC (tCur: %f): %f\n", tCur, Now());
-tLast := tCur;
-tCur := tCur + tLoop;
-while tCur <= tEnd do
-    'Write sampled values
+
+' Initialize state
+Yield(tCur+tLoop - Now());  'wait for marker
+tStartMPC := LastTime(chMarker%, Now());
+PrintLog("Start MPC: %f\n", tStartMPC);
+tLast := tStartMPC;
+tLastRead := tLast;
+
+' Run main loop
+var nLoops% := Ceil(waitMPC/tLoop);
+var i%;
+for i% := 1 to nLoops% do
+    tCur := tStartMPC + i%*tLoop;
+    
+    ' Sleep (no wait if negative)
+    Yield(tCur - Now());
+
+    ' Break if sampling is interrupted
+    'TEST
+    'if (SampleStatus() <> 2) then
+    '    PrintLog("Sampling interrupted! (tCur: %f): %f\n", tCur, tSpent);
+    '    break;
+    'endif;
+    
+    ' Write sampled values
     UpdateUKF%();
     
-    'Read control action
+    ' Read control action
     var ret% := UpdateMPC%();
     if (ret%) then
         UpdateSequencer%();
     endif;
     
-    'Update state variables
+    ' Update state variables
     var tSpent := (Now() - tCur);
     UpdateStateCh%(chLoopTime%, tCur, tSpent);
     if (tSpent > tLoop) then
         PrintLog("Exceeded loop time! (tCur: %f): %f\n", tCur, tSpent);
     endif;
     
-    'Continue with next loop
+    ' Continue with next loop
     tLast := tCur;
     tCur := tCur + tLoop;
-    Yield(tCur - Now()); 'sleep (no wait if negative)
-wend;
+    
+next;
 
 PrintLog("Stop MPC (tLast: %f): %f\n", tLast, Now());
 
@@ -551,7 +575,6 @@ return 1;
 end;
 
 
-
 ' ------------------------------------------------------------------------------
 Func UpdateToolbar%();
 ' Enables/disables toolbar buttons according to current state
@@ -561,14 +584,34 @@ return 1;
 end;
 
 
-
 ' ------------------------------------------------------------------------------
 Func Idle%()
-'Wait for time to start
-if (Now() >= waitBefore - 1.0) then
-    RunMPC%();
-    return Quit%();
+' Update running sequence
+if (Now() >= tNextStep) then
+    docase
+    case runStep% = 0 then
+        ' pre
+        tNextStep := tNextStep + waitPre;
+        runStep% := 1;
+        
+    case runStep% = 1 then
+        ' MPC
+        RunMPC%();
+        tNextStep := tNextStep + waitMPC;
+        runStep% := 2;
+        
+    case runStep% = 2 then
+        ' post
+        runStep% := 3;
+        
+    case runStep% = 3 then
+        ' end
+        Quit%();
+        return 0;
+        
+    endcase;
 endif;
+
 ' Keep script running
 return 1;
 end;

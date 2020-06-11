@@ -134,7 +134,8 @@ a_mpc = a_mpc(:,1:N);
 times = times(:,1:N);
 
 % Save workspace
-matfile = sprintf('MPC_%s.mat', datestr(now, 30));
+session_id = [ 'MPC_' datestr(now, 30) ];
+matfile = [ basepath session_id '.mat' ];
 save(matfile);
 fprintf('Saved %s\n', matfile);
 
@@ -151,31 +152,66 @@ for k = 1:N
     a_calc(k) = abs(-log(1 - r/x_ukf(1,k)) / x_ukf(2,k));
 end
 
-figure;
-h = 5; w = 1;
-ha = gobjects(h,w);
-ha(1) = subplot(h,w,1);
+y_amp_lls = nan(1,N);
+M = fs;
+for k = M:N
+    ii_ = (k-M+1:k);
+    phi_ = 2*pi*f/fs*ii_';
+    x_ = [cos(phi_) ones(M,1)];
+    y_ = y_meas(ii_)';
+
+    p_ = x_ \ y_;
+    y_amp_lls(k) = p_(1);
+end
+
+% x_mhe = nan(Nx,N);
+% y_amp_mhe = nan(1,N);
+% M = fs;
+% for k = M:N
+%     ii_ = (k-M+1:k);
+%     u_ = [a_mpc(ii_); cos(2*pi*f*dt*(ii_-1))];
+%     y_ = y_meas(ii_);
+% 
+%     f = @(p,x) p(1)*(1 - exp(-p(2),x(1,:))).*x(2,:);
+%     x_mhe(:,k) = nlinfit(u_, y_, f, x_mpc(k));
+%     y_amp_mhe = ukf.MeasurementFcn(x_ukf(:,k), [a_mpc(k); 1]);
+% end
+
+fig = figure;
+h = 4; w = 1;
+tl = tiledlayout(h,w, 'TileSpacing','compact', 'Padding','compact');
+
+nexttile;
 plot(t, [a_mpc; a_calc]);
-ylabel('u');
+ylabel('u,û');
+xticklabels([]);
 
-ha(2) = subplot(h,w,2);
+nexttile;
 plot(t, [y_meas; y_pred]);
-ylabel('y');
+ylabel('y,ŷ');
+xticklabels([]);
 
-ha(3) = subplot(h,w,3); hold on;
-plot(t, y_amp);
+nexttile; hold on;
 plot(xlim, [r r], '--');
-ylabel('y_amp, r');
+plot(t, [y_amp; y_amp_lls]);
+ylabel('r, ŷ_a, ŷ_{a,ls}');
+mse = nanmean((y_amp_lls-r).^2);
+text(.01,.9, sprintf('MSE: %.1e', mse), 'Units','normalized');
+xticklabels([]);
 
-ha(4) = subplot(h,w,4);
+nexttile;
 plot(t, x_ukf(1,:));
 ylabel('g');
 
-ha(5) = subplot(h,w,5);
+yyaxis right;
 plot(t, x_ukf(2,:));
 ylabel('b');
+xlabel('Time (s)');
 
-linkaxes(ha, 'x');
+linkaxes(tl.Children, 'x');
+session_id = matfile(1:end-4);
+title(tl, escape(session_id));
+save_figure(fig, session_id, [], [1920 1080]*(150/96));
 
 
 %% Functions

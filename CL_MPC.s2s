@@ -37,12 +37,14 @@ const chMarker% := 32;      'DigMark channel (for reading sequencer markers)
 ' ------------------------------------------------------------------------------
 ' Configuration defaults (initial values)
 var ch% := 12;              'Channel to control
+'var ch% := 2;               'Channel to control
 var freq := 8;              'Frequency to control
 var waitPre := 30;          'Delay before experiment (s)
-var waitMPC:= 120;          'MPC duration (s)
-var waitPos := 30;          'Delay after experiment (s)
+var waitMPC := 600;         'MPC duration (s)
+var waitPos := 270;         'Delay after experiment (s)
 var vThres := 0.1;          'Minimum stimulation threshold (V)
 var umax := 1.0;            'Maximum stimulation amplitude for PID (V pk-pk)
+'var umax := 4.0;            'Maximum stimulation amplitude for PID (V pk-pk)
 
 ' ------------------------------------------------------------------------------
 ' General state variables

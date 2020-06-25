@@ -396,7 +396,7 @@ ret% := ChanData(ch%, bufferSample, tLastRead+ts, tCur);
 ' Update marker channel
 UpdateStateCh%(chSampleCount%, Now(), ret%);
 
-if (ret% > 0) then
+if (ret% >= nStep%) then
     'FIXME: Downsample
     n% := ret%/nStep%;  'truncated
     var i%;
@@ -543,7 +543,7 @@ end;
 ' ------------------------------------------------------------------------------
 Func UpdateSequencer%();
 ' Update sequencer variables
-var amp := 0.5 * u;
+var amp := 0.5 * u * umax;
 SampleSeqVar(varFreq%, vHz%(freq, msPerStep));
 SampleSeqVar(varSize%, vSz%(amp, DACscale));
 SampleSeqVar(varOffs%, vDAC32%(vThres + amp, DACscale, DACoffset));

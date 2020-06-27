@@ -1,0 +1,32 @@
+' README
+'
+' # Configuration (for real-time performance)
+' ## Spike 2
+' - In "Edit -> "Edit preferences..." -> "Scheduler", set values to (1, 0, 0).
+' ## Windows Task Manager
+' - In "Details", set priority of "sonview.exe" and "MATLAB.exe" to "Realtime".
+'
+' # Running
+' 1) Open MATLAB, run "OptoCL_run(...)" (or a corresponding script).
+' 2) Run this script.
+'
+' ------------------------------------------------------------------------------
+#include "OptoCL_base.s2s"       'Variable and function definitions
+
+' DAC0: KA485 (OL)
+dacOL% := 0;        'DAC port for open-loop stimulation
+vThres[0] := 0.1;   'Minimum stimulation threshold (V)
+vppMax[0] := 4.0;   'Maximum stimulation amplitude (V pk-pk)
+uOL := 0.04;        'Open-loop stimulation amplitude (0-1)
+
+' DAC1: KA487 (CL)
+dacCL% := 1;        'DAC port for closed-loop stimulation
+vThres[0] := 0.1;   'Minimum stimulation threshold (V)
+vppMax[0] := 1.0;   'Maximum stimulation amplitude (V pk-pk)
+ch% := 12;          'Channel to control (HC1_2)
+
+' Skip configuration dialog
+isConfigured% := 1;
+
+' Run OptoCL
+Start%();

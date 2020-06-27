@@ -7,7 +7,7 @@
 ' - In "Details", set priority of "sonview.exe" and "MATLAB.exe" to "Realtime".
 '
 ' # Running
-' 1) Open MATLAB, run "CL_MPC.m".
+' 1) Open MATLAB, run "OptoCL_run(...)" (or a corresponding script).
 ' 2) Run this script.
 '
 ' ==============================================================================
@@ -24,8 +24,12 @@ const msPerStep := 0.01;    'Sequencer configuration
 const DACscale  := 1;       'Sequencer configuration
 const DACoffset := 0;       'Sequencer configuration
 const varFreq% := 1;        'Sequencer variable number
-const varSize% := 2;        'Sequencer variable number
-const varOffs% := 3;        'Sequencer variable number
+var varSize%[2];            'Sequencer variable numbers (array)
+var varOffs%[2];            'Sequencer variable numbers (array)
+varSize%[0] := 2;           'Sequencer variable number
+varOffs%[0] := 3;           'Sequencer variable number
+varSize%[1] := 4;           'Sequencer variable number
+varOffs%[1] := 5;           'Sequencer variable number
 
 const pathBase$ := "C:\\MPC";                   ' Path for MATLAB IPC files
 const pathFileY$ := pathBase$ + "\\" + "y.bin"; ' Path for MATLAB IPC files
@@ -37,14 +41,19 @@ const chMarker% := 32;      'DigMark channel (for reading sequencer markers)
 ' ------------------------------------------------------------------------------
 ' Configuration defaults (initial values)
 var ch% := 12;              'Channel to control
-'var ch% := 2;               'Channel to control
 var freq := 8;              'Frequency to control
 var waitPre := 30;          'Delay before experiment (s)
 var waitMPC := 600;         'MPC duration (s)
 var waitPos := 270;         'Delay after experiment (s)
-var vThres := 0.1;          'Minimum stimulation threshold (V)
-var umax := 1.0;            'Maximum stimulation amplitude for PID (V pk-pk)
-'var umax := 4.0;            'Maximum stimulation amplitude for PID (V pk-pk)
+var vThres[2];              'Minimum stimulation threshold (array)
+vThres[0] := 0.1;           'Minimum stimulation threshold (V)
+vThres[1] := 0.1;           'Minimum stimulation threshold (V)
+var vppMax[2];              'Maximum stimulation amplitude (array)
+vppMax[0] := 1.0;           'Maximum stimulation amplitude (V pk-pk)
+vppMax[1] := 1.0;           'Maximum stimulation amplitude (V pk-pk)
+var uOL := 0.5;             'Open-loop stimulation amplitude (0-1)
+var dacCL% := 1;            'DAC port for closed-loop stimulation
+var dacOL% := 0;            'DAC port for open-loop stimulation
 
 ' ------------------------------------------------------------------------------
 ' General state variables
@@ -216,36 +225,24 @@ Func Configure%();
 DlgCreate("Control parameters");
 DlgReal(1, "Controlled frequency", 4, 100);
 DlgReal(2, "Pause before experiment (s)", 0, 3600);
-DlgReal(3, "MPC duration (s)", 0, 3600);
-DlgReal(4, "Minimum stimulation threshold (V)", 0, 5);
-DlgReal(5, "Stimulation limit (V, peak-to-peak)", 0, 5);
-var ret% := DlgShow(freq, waitPre, waitMPC, vThres, umax);
+DlgReal(3, "Stimulation length (s)", 0, 3600);
+DlgReal(4, "DAC0: Minimum stimulation threshold (V)",   0, 5);
+DlgReal(5, "DAC0: Stimulation limit (V, peak-to-peak)", 0, 5);
+DlgReal(6, "DAC1: Minimum stimulation threshold (V)",   0, 5);
+DlgReal(7, "DAC1: Stimulation limit (V, peak-to-peak)", 0, 5);
+DlgReal(8, "DAC# for open-loop control",   0, 1);
+DlgReal(9, "DAC# for closed-loop control", 0, 1);
+DlgReal(10,"Open-loop stimulation amplitude (0-1)", 0, 1);
+DlgReal(11,"Channel# for closed-loop control (recording)", 0, 31);
+var ret% := DlgShow(freq, waitPre, waitMPC,
+                    vThres[0], vppMax[0], vThres[1], vppMax[1],
+                    dacOL%, dacCL%, uOL, ch%);
 if (ret% = 0) then
     'Dialog canceled
     return 1;
 endif;
 
 'TODO: Warn about invalid configurations (eg, vOpenLoop > ulim, vThres+ulim > 5)
-
-if SampleStatus() = -1 then
-    'No sampling window active, start one with the current configuration
-    FileNew(0, 3);  'Create sampling window and make it visible
-endif;
-
-'FrontView(-1);
-vSample% := SampleHandle(0);
-
-'TODO: Verify sampling and sequencer parameters
-
-' Initialize memory channels for state variables
-chSeqValueU%   := CreateMemoryChannel%(chSeqValueU%,   "u",        "", "", 0.0, 1.0);
-chReadCount%   := CreateMemoryChannel%(chReadCount%,   "read",    "#", "", 0.0, 2.0);
-chSampleCount% := CreateMemoryChannel%(chSampleCount%, "sampled", "#", "", 0.0, 2.0*fs%*tLoop);
-chWriteCount%  := CreateMemoryChannel%(chWriteCount%,  "written", "#", "", 0.0, 2.0*fs%*tLoop/nStep%);
-chLoopTime%    := CreateMemoryChannel%(chLoopTime%,    "loop",    "s", "", 0.0, 2.0*tLoop);
-
-' Initialize sampler sequence
-SampleSequencer("CL_seq.pls");
 
 isConfigured% := 1;
 
@@ -286,9 +283,31 @@ end;
 ' ------------------------------------------------------------------------------
 Func Start%();
 
+ClearLog%();
+
 if not isConfigured% then
     Configure%();
 endif;
+
+if SampleStatus() = -1 then
+    'No sampling window active, start one with the current configuration
+    FileNew(0, 3);  'Create sampling window and make it visible
+endif;
+
+'FrontView(-1);
+vSample% := SampleHandle(0);
+
+'TODO: Verify sampling and sequencer parameters
+
+' Initialize memory channels for state variables
+chSeqValueU%   := CreateMemoryChannel%(chSeqValueU%,   "u",        "", "", 0.0, 1.0);
+chReadCount%   := CreateMemoryChannel%(chReadCount%,   "read",    "#", "", 0.0, 2.0);
+chSampleCount% := CreateMemoryChannel%(chSampleCount%, "sampled", "#", "", 0.0, 2.0*fs%*tLoop);
+chWriteCount%  := CreateMemoryChannel%(chWriteCount%,  "written", "#", "", 0.0, 2.0*fs%*tLoop/nStep%);
+chLoopTime%    := CreateMemoryChannel%(chLoopTime%,    "loop",    "s", "", 0.0, 2.0*tLoop);
+
+' Initialize sampler sequence
+SampleSequencer("CL_seq.pls");
 
 if SampleStatus() = 0 then
     'Sampling window is ready but inactive, start sampling
@@ -308,8 +327,9 @@ ChanShow(chLoopTime%);
 
 PrintLog("Start: %f\n", Now());
 
-' Update toolbar
-UpdateToolbar%();
+' Initialize toolbar
+InitToolbar%();
+
 return 1;
 end;
 
@@ -545,10 +565,18 @@ end;
 ' ------------------------------------------------------------------------------
 Func UpdateSequencer%();
 ' Update sequencer variables
-var amp := 0.5 * u * umax;
 SampleSeqVar(varFreq%, vHz%(freq, msPerStep));
-SampleSeqVar(varSize%, vSz%(amp, DACscale));
-SampleSeqVar(varOffs%, vDAC32%(vThres + amp, DACscale, DACoffset));
+var amp;
+
+'CL amp
+amp := 0.5 * u*vppMax[dacCL%];
+SampleSeqVar(varSize%[dacCL%], vSz%(amp, DACscale));
+SampleSeqVar(varOffs%[dacCL%], vDAC32%(vThres[dacCL%] + amp, DACscale, DACoffset));
+
+'OL amp
+amp := 0.5*uOL*vppMax[dacOL%];
+SampleSeqVar(varSize%[dacOL%], vSz%(amp, DACscale));
+SampleSeqVar(varOffs%[dacOL%], vDAC32%(vThres[dacOL%] + amp, DACscale, DACoffset));
 
 ' Update data and marker channels
 UpdateStateCh%(chSeqValueU%, Now(), u);
@@ -604,10 +632,10 @@ endif;
 return 1;
 end;
 
-' ==============================================================================
-' Initialize toolbar with idle function
 
-ClearLog%();
+' ------------------------------------------------------------------------------
+Func InitToolbar%()
+' Initialize toolbar with idle function
 
 ToolbarSet(5, "Optimise view", OptimiseView%);
 ToolbarSet(4, "Configure", Configure%);
@@ -616,6 +644,9 @@ ToolbarSet(2, "Stop", Stop%);
 ToolbarSet(1, "Quit", Quit%);
 ToolbarSet(0, "Idle", Idle%);
 
-' Open configuration dialog and run
-Start%();
 Toolbar("MPC", 0x03FF);      'Display toolbar, allow all user actions
+
+' Update button status
+UpdateToolbar%();
+
+end;

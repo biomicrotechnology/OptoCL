@@ -1,9 +1,13 @@
-% README
-% First run this file, then run CL_MPC.s2s in Spike2
-% See also CL_MPC.s2s
+function OptoCL_run(r, X0, S0, S, W)
+% Run OptoCL
+% See also OptoCL_run.s2s
 
-clear;
-fclose('all');
+%% Input parameters (example)
+% r = 0.1;                    % target reference
+% X0 = [ 0.15 3 ];            % initial estimate
+% S0 = diag([ 1e-4  1e-4 ]);  % initial estimate covariances
+% S  = diag([ 1e-6  1e-6 ]);  % process noise
+% W  = 1e-2;                  % measurement noise variance
 
 
 %% Config
@@ -20,40 +24,6 @@ filename_lock = [basepath 'lock'];
 
 
 %% Initialize UKF
-% %2020-06-14
-% r = 0.1;    % target reference
-% %r = 0.2;    % target reference
-% %    [ g         b      ]
-% % X0 = [ 0.1575    3.0171 ];  % initial estimate
-% % S  = 1e-8 * [ 1 1 ];        % noise covariances
-% %S  = [ 1e-5 1e-5 ];         % state covariances
-% S  = 1e-6 * [ 1 1 ];        % noise covariances
-% X0 = [ 0.1488    3.1105 ];      % initial estimate
-% %X0 = [ 0.3223   5 ];
-% W  = 1e-2;                  % measurement noise variance
-
-%2020-06-21
-%KA487 (OL: 0.11)
-r = 0.04;                           % target reference
-X0 = [  0.1333    3.2853 ];         % initial estimate
-S0 = [  3.0249e-05 -7.9457e-04
-       -7.9457e-04  3.0057e-02 ];   % initial estimate covariances
-S  = [  1.2917e-09 -5.7918e-08
-       -5.7918e-08  3.1897e-06 ];   % process noise
-% S = diag([1e-6 1e-6]);
-W  = 0.0080;                        % measurement noise variance
-
-% %KA485 (OL: 0.04)
-r = 0.1;                            % target reference
-X0 = [  0.2386   14.3538 ];         % initial estimate
-S0 = [  2.0808e-05 -3.2438e-04
-       -3.2438e-04  1.2366e-01 ];   % initial estimate covariances
-S  = [  1.6696e-10 -3.7457e-08
-       -3.7457e-08  4.6408e-05 ];   % process noise
-% S = diag([1e-6 1e-6]);
-W  = 0.0258;                        % measurement noise variance
-
-%%
 ukf = UKF_setup(X0, S0, S, W);
 
 % Create output file
@@ -64,8 +34,13 @@ fprintf('Opened %s for writing\n', filename_u);
 a = MPC_update(X0, r);
 fwrite(fid_u, a, 'double');
 
+% Wait for lock file
+fprintf('Waiting for lock file...\n');
+while ~isfile(filename_lock)
+    pause(1e-3); % sleep 1 ms
+end
+
 % Wait for input file
-if isfile(filename_y), delete(filename_y); end
 fprintf('Waiting for %s...\n', filename_y);
 while true
     fid_y = fopen(filename_y, 'r');
@@ -75,6 +50,8 @@ while true
     end
     pause(1e-3); % sleep 1 ms
 end
+
+fprintf('Ready.\n');
 
 
 %% Read
@@ -120,7 +97,15 @@ while true
         % Obtain UKF estimate
         UKF_update(ukf, y, u, n);
     catch ME
-        warning(getReport(ME));
+        switch ME.identifier
+            case 'shared_tracking:UnscentedKalmanFilter:StateCovarianceNotPSD'
+                % S not PSD. Reset to initial state
+                fprintf('Error: S not PSD. Reseting to initial state...\n');
+                ukf.State = X0;
+                ukf.StateCovariance = S0;
+            otherwise
+                warning(getReport(ME));
+        end
     end
     
     x = ukf.State;
@@ -240,9 +225,10 @@ xlabel('Time (s)');
 linkaxes(tl.Children, 'x');
 title(tl, escape(session_id));
 save_figure(fig, session_id, [], [1920 1080]*(150/96));
+end
 
 
-%% Functions
+%% Internal functions
 function a = MPC_update(x, r)
     g = x(1);
     b = x(2);

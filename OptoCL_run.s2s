@@ -1,0 +1,17 @@
+' README
+'
+' # Configuration (for real-time performance)
+' ## Spike 2
+' - In "Edit -> "Edit preferences..." -> "Scheduler", set values to (1, 0, 0).
+' ## Windows Task Manager
+' - In "Details", set priority of "sonview.exe" and "MATLAB.exe" to "Realtime".
+'
+' # Running
+' 1) Open MATLAB, run "OptoCL_run(...)" (or a corresponding script).
+' 2) Run this script.
+'
+' ==============================================================================
+#include "OptoCL_base.s2s"       'Variable and function definitions
+
+' Open configuration dialog and run
+Start%();

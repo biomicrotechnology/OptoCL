@@ -44,7 +44,7 @@ var ch% := 12;              'Channel to control
 var freq := 8;              'Frequency to control
 var waitPre := 30;          'Delay before experiment (s)
 var waitMPC := 600;         'MPC duration (s)
-var waitPos := 270;         'Delay after experiment (s)
+var waitPos := 90;         'Delay after experiment (s)
 var vThres[2];              'Minimum stimulation threshold (array)
 vThres[0] := 0.1;           'Minimum stimulation threshold (V)
 vThres[1] := 0.1;           'Minimum stimulation threshold (V)

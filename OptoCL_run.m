@@ -1,4 +1,4 @@
-function OptoCL_run(r, X0, S0, S, W)
+function [x, S] = OptoCL_run(r, X0, S0, V, W)
 % Run OptoCL
 % See also OptoCL_run.s2s
 
@@ -24,7 +24,7 @@ filename_lock = [basepath 'lock'];
 
 
 %% Initialize UKF
-ukf = UKF_setup(X0, S0, S, W);
+ukf = UKF_setup(X0, S0, V, W);
 
 % Create output file
 fid_u = fopen(filename_u, 'w');
@@ -88,7 +88,7 @@ while true
     % Create control input vector
     a_ = a_last*ones(n,1);
     a_(ceil(ii/ncycle) > c) = a_calc;
-    phi_ = 2*pi*f*dt*(ii-1)';
+    phi_ = 2*pi*f*dt*ii';
 
     u = [a_ cos(phi_)];
 
@@ -108,6 +108,8 @@ while true
         end
     end
     
+    ukf.State(2) = min(max(1e-2, ukf.State(2)), 1e2);
+
     x = ukf.State;
     S = ukf.StateCovariance;
 
@@ -235,6 +237,6 @@ function a = MPC_update(x, r)
     
     % Calculate desired control
     %r = g*(1 - exp(-b*a));
-    a = -log(max(0, 1 - r/g)) / b;
+    a = -log(max(0, 1 - abs(r/g))) / b;
     a = min(max(0.0, a), 1.0);
 end

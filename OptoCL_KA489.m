@@ -7,11 +7,17 @@ fclose('all');
 
 
 %% Initialize and run OptoCL
-%KA481 (OL: 0.1239)
-load('KA481_200603_000_21000_105000.mat', 'X0','S0','V','W');
+%KA489 (OL: 0.1493)
+load('KA489_200604_000_21000_105000.mat', 'X0','S0','V','W');
 r = 0.12;	% target reference
 x = X0;
 S = S0;
+
+
+%% Scale V
+% vs = diag([1 0.1]);
+vs = diag([10 0.1]);
+V = vs*V*vs;
 
 
 %% Optimal u_a
@@ -20,9 +26,4 @@ disp(u_a)
 
 
 %% Run MPC
-[x, S] = OptoCL_run(r, x, S, V, W);
-
-
-%% Scale V
-Vs = diag([10 1]);
-V = Vs*V*Vs;
+[x, S] = OptoCL_run(r, x, S, V, W);cl

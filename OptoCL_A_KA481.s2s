@@ -17,8 +17,7 @@
 vThres[0] := 0.1;   'Minimum stimulation threshold (V)
 vppMax[0] := 4.0;   'Maximum stimulation amplitude (V pk-pk)
 dacOL% := 0;        'DAC port for closed-loop stimulation
-'uOL := 0.043;       'Open-loop stimulation amplitude (0-1)
-uOL := 0.019;       'Open-loop stimulation amplitude (0-1)
+uOL := 0.0269;       'Open-loop stimulation amplitude (0-1)
 
 ' DAC1: KA481 (CL)
 vThres[1] := 0.5;   'Minimum stimulation threshold (V)

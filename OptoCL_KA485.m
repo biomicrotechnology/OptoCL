@@ -7,16 +7,22 @@ fclose('all');
 
 
 %% Initialize and run OptoCL
-%KA485 (OL: 0.043)
-r = 0.11;                           % target reference
-%X0 = [  0.2386   14.3538 ];         % initial estimate
-X0 = [  0.2759   25.7603 ];
-S0 = [  2.0808e-05 -3.2438e-04
-       -3.2438e-04  1.2366e-01 ];   % initial estimate covariances
-S  = [  1.6696e-10 -3.7457e-08
-       -3.7457e-08  4.6408e-05 ];   % process noise
-W  = 0.0258;                        % measurement noise variance
+%KA485 (OL: 0.0269)
+load('KA485_200603_000_21000_105000.mat', 'X0','S0','V','W');
+r = 0.11;	% target reference
+x = X0;
+S = S0;
 
 
 %% Run MPC
-OptoCL_run(r, X0, S0, S, W);
+[x, S] = OptoCL_run(r, x, S, V, W);
+
+
+%% Optimal u_a
+u_a = -log(max(0, 1 - r/x(1))) / x(2);
+disp(u_a)
+
+
+%% Scale V
+Vs = diag([1 .1]);
+V = Vs*V*Vs;

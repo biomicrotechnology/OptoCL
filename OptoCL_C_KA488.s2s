@@ -13,18 +13,22 @@
 ' ------------------------------------------------------------------------------
 #include "OptoCL_base.s2s"       'Variable and function definitions
 
-' DAC0: KA485 (CL)
+' DAC0: KA490 (OL)
 vThres[0] := 0.1;   'Minimum stimulation threshold (V)
-vppMax[0] := 4.0;   'Maximum stimulation amplitude (V pk-pk)
-dacCL% := 0;        'DAC port for open-loop stimulation
-ch% := 2;           'Channel to control (HC1)
+vppMax[0] := 1.0;   'Maximum stimulation amplitude (V pk-pk)
+'dacCL% := 0;        'DAC port for open-loop stimulation
+'ch% := 2;           'Channel to control (HC1)
+dacOL% := 0;        'DAC port for open-loop stimulation
+'uOL := 0.1310;      'Open-loop stimulation amplitude (0-1)
+uOL := 0.1141;      'Open-loop stimulation amplitude (0-1)
 
-' DAC1: KA481 (OL)
-vThres[1] := 0.5;   'Minimum stimulation threshold (V)
+' DAC1: KA488 (CL)
+vThres[1] := 0.1;   'Minimum stimulation threshold (V)
 vppMax[1] := 4.0;   'Maximum stimulation amplitude (V pk-pk)
-dacOL% := 1;        'DAC port for closed-loop stimulation
-'uOL := 0.1239;      'Open-loop stimulation amplitude (0-1)
-uOL := 0.1206;      'Open-loop stimulation amplitude (0-1)
+dacCL% := 1;        'DAC port for closed-loop stimulation
+ch% := 12;          'Channel to control (HC1_2)
+'dacOL% := 1;        'DAC port for closed-loop stimulation
+'uOL := 0.8578;      'Open-loop stimulation amplitude (0-1)
 
 ' Skip configuration dialog
 isConfigured% := 1;

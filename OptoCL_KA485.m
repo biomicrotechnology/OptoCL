@@ -14,8 +14,10 @@ x = X0;
 S = S0;
 
 
-%% Run MPC
-[x, S] = OptoCL_run(r, x, S, V, W);
+%% Scale V
+%Vs = diag([1 .1]);
+Vs = diag([10 1]);
+V = Vs*V*Vs;
 
 
 %% Optimal u_a
@@ -23,6 +25,6 @@ u_a = -log(max(0, 1 - r/x(1))) / x(2);
 disp(u_a)
 
 
-%% Scale V
-Vs = diag([1 .1]);
-V = Vs*V*Vs;
+%% Run MPC
+[x, S] = OptoCL_run(r, x, S, V, W);
+
